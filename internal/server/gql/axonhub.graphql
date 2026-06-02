@@ -74,12 +74,14 @@ type ChannelEndpoint {
   apiFormat: String!
   path: String
   baseURL: String
+  transport: String
 }
 
 input ChannelEndpointInput {
   apiFormat: String!
   path: String
   baseURL: String
+  transport: String
 }
 
 input SaveChannelEndpointsInput {
@@ -785,6 +787,7 @@ type Mutation {
   updateAPIKey(id: ID!, input: UpdateAPIKeyInput!): APIKey!
   updateAPIKeyStatus(id: ID!, status: APIKeyStatus!): APIKey!
   updateAPIKeyProfiles(id: ID!, input: UpdateAPIKeyProfilesInput!): APIKey!
+  rotateAPIKey(id: ID!): APIKey!
   bulkDisableAPIKeys(ids: [ID!]!): Boolean!
   bulkEnableAPIKeys(ids: [ID!]!): Boolean!
   bulkArchiveAPIKeys(ids: [ID!]!): Boolean!

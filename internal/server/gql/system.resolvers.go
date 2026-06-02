@@ -36,6 +36,13 @@ func (r *mutationResolver) UpdateBrandSettings(ctx context.Context, input Update
 		}
 	}
 
+	if input.Title != nil {
+		err := r.systemService.SetTitle(ctx, *input.Title)
+		if err != nil {
+			return false, fmt.Errorf("failed to update title setting: %w", err)
+		}
+	}
+
 	return true, nil
 }
 
@@ -71,6 +78,19 @@ func (r *mutationResolver) UpdateWebhookNotifierConfig(ctx context.Context, inpu
 
 // UpdateSystemModelSettings is the resolver for the updateSystemModelSettings field.
 func (r *mutationResolver) UpdateSystemModelSettings(ctx context.Context, input biz.SystemModelSettings) (bool, error) {
+	// Older clients may update the model toggles without sending developer rules.
+	// Preserve them unless the caller explicitly sends an empty list.
+	// This still follows the existing last-writer-wins behavior for concurrent
+	// full settings updates; callers editing developer rules should send the
+	// complete developerSettings list.
+	if input.DeveloperSettings == nil {
+		current, err := r.systemService.ModelSettings(ctx)
+		if err != nil {
+			return false, fmt.Errorf("failed to get current system model settings: %w", err)
+		}
+		input.DeveloperSettings = current.DeveloperSettings
+	}
+
 	err := r.systemService.SetModelSettings(ctx, input)
 	if err != nil {
 		return false, fmt.Errorf("failed to update system model settings: %w", err)
@@ -328,9 +348,15 @@ func (r *queryResolver) BrandSettings(ctx context.Context) (*BrandSettings, erro
 		return nil, fmt.Errorf("failed to get brand logo: %w", err)
 	}
 
+	title, err := r.systemService.Title(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get title: %w", err)
+	}
+
 	return &BrandSettings{
 		BrandName: &brandName,
 		BrandLogo: &brandLogo,
+		Title:     &title,
 	}, nil
 }
 
