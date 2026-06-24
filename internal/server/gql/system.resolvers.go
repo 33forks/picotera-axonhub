@@ -206,6 +206,33 @@ func (r *mutationResolver) UpdateQuotaEnforcementSettings(ctx context.Context, i
 	return true, nil
 }
 
+// UpdateSecuritySettings is the resolver for the updateSecuritySettings field.
+func (r *mutationResolver) UpdateSecuritySettings(ctx context.Context, input UpdateSecuritySettingsInput) (bool, error) {
+	current, err := r.systemService.SecuritySettings(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to read current security settings: %w", err)
+	}
+
+	newSettings := biz.SecuritySettings{
+		BlockedIPs:              current.BlockedIPs,
+		ShowRequestLogIPBanIcon: current.ShowRequestLogIPBanIcon,
+	}
+
+	if input.BlockedIPs != nil {
+		newSettings.BlockedIPs = input.BlockedIPs
+	}
+	if input.ShowRequestLogIPBanIcon != nil {
+		newSettings.ShowRequestLogIPBanIcon = *input.ShowRequestLogIPBanIcon
+	}
+
+	err = r.systemService.SetSecuritySettings(ctx, newSettings)
+	if err != nil {
+		return false, fmt.Errorf("failed to update security settings: %w", err)
+	}
+
+	return true, nil
+}
+
 // CheckProviderQuotas is the resolver for the checkProviderQuotas field.
 func (r *mutationResolver) CheckProviderQuotas(ctx context.Context) (bool, error) {
 	if r.providerQuotaService == nil {
@@ -213,6 +240,23 @@ func (r *mutationResolver) CheckProviderQuotas(ctx context.Context) (bool, error
 	}
 
 	r.providerQuotaService.ManualCheck(ctx)
+
+	return true, nil
+}
+
+// ResetChannelQuotaNow is the resolver for the resetChannelQuotaNow field.
+func (r *mutationResolver) ResetChannelQuotaNow(ctx context.Context, channelID objects.GUID) (bool, error) {
+	if !scopes.UserHasScope(ctx, scopes.ScopeWriteChannels) {
+		return false, fmt.Errorf("permission denied: requires write:channels scope")
+	}
+
+	if r.providerQuotaService == nil {
+		return false, fmt.Errorf("provider quota service is not available")
+	}
+
+	if err := r.providerQuotaService.ResetChannelQuotaNow(ctx, channelID.ID); err != nil {
+		return false, fmt.Errorf("failed to reset channel quota: %w", err)
+	}
 
 	return true, nil
 }
@@ -478,6 +522,11 @@ func (r *queryResolver) VideoStorageSettings(ctx context.Context) (*biz.VideoSto
 // QuotaEnforcementSettings is the resolver for the quotaEnforcementSettings field.
 func (r *queryResolver) QuotaEnforcementSettings(ctx context.Context) (*biz.QuotaEnforcementSettings, error) {
 	return r.systemService.QuotaEnforcementSettings(ctx)
+}
+
+// SecuritySettings is the resolver for the securitySettings field.
+func (r *queryResolver) SecuritySettings(ctx context.Context) (*biz.SecuritySettings, error) {
+	return r.systemService.SecuritySettings(ctx)
 }
 
 // ProxyPresets is the resolver for the proxyPresets field.

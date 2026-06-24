@@ -574,6 +574,14 @@ func TestIsCompletedAggregatedOutboundResponse(t *testing.T) {
 		require.False(t, isCompletedAggregated(llm.ResponseMeta{ID: "resp_123"}))
 	})
 
+	t.Run("explicit completed flag is completed", func(t *testing.T) {
+		require.True(t, isCompletedAggregated(llm.ResponseMeta{ID: llm.SpeechStreamResponseID, Completed: true}))
+	})
+
+	t.Run("speech stream aggregate id alone is not completed", func(t *testing.T) {
+		require.False(t, isCompletedAggregated(llm.ResponseMeta{ID: llm.SpeechStreamResponseID}))
+	})
+
 	t.Run("missing usage and id is not completed", func(t *testing.T) {
 		require.False(t, isCompletedAggregated(llm.ResponseMeta{}))
 	})
@@ -984,7 +992,7 @@ func TestPersistentOutboundTransformer_CanRetry_429_WithoutRetryAfter(t *testing
 		Outbound: &mockTransformer{},
 	}
 
-	t.Run("429 without Retry-After (nil headers) should allow retry", func(t *testing.T) {
+	t.Run("429 without Retry-After (nil headers) should skip same-channel retry", func(t *testing.T) {
 		outbound := &PersistentOutboundTransformer{
 			wrapped: &mockTransformer{},
 			state: &PersistenceState{
@@ -1002,10 +1010,10 @@ func TestPersistentOutboundTransformer_CanRetry_429_WithoutRetryAfter(t *testing
 			Headers:    nil,
 		}
 
-		require.True(t, outbound.CanRetry(httpErr))
+		require.False(t, outbound.CanRetry(httpErr))
 	})
 
-	t.Run("429 without Retry-After (empty headers) should allow retry", func(t *testing.T) {
+	t.Run("429 without Retry-After (empty headers) should skip same-channel retry", func(t *testing.T) {
 		outbound := &PersistentOutboundTransformer{
 			wrapped: &mockTransformer{},
 			state: &PersistenceState{
@@ -1023,10 +1031,10 @@ func TestPersistentOutboundTransformer_CanRetry_429_WithoutRetryAfter(t *testing
 			Headers:    http.Header{},
 		}
 
-		require.True(t, outbound.CanRetry(httpErr))
+		require.False(t, outbound.CanRetry(httpErr))
 	})
 
-	t.Run("429 without Retry-After (headers but no Retry-After key) should allow retry", func(t *testing.T) {
+	t.Run("429 without Retry-After (headers but no Retry-After key) should skip same-channel retry", func(t *testing.T) {
 		outbound := &PersistentOutboundTransformer{
 			wrapped: &mockTransformer{},
 			state: &PersistenceState{
@@ -1046,8 +1054,36 @@ func TestPersistentOutboundTransformer_CanRetry_429_WithoutRetryAfter(t *testing
 			},
 		}
 
-		require.True(t, outbound.CanRetry(httpErr))
+		require.False(t, outbound.CanRetry(httpErr))
 	})
+}
+
+func TestPersistentOutboundTransformer_CanRetry_ChannelRetryableStatusCodes(t *testing.T) {
+	channel := &biz.Channel{
+		Channel: &ent.Channel{
+			ID:   1,
+			Name: "test-channel",
+			Settings: &objects.ChannelSettings{
+				RetryableStatusCodes: []int{http.StatusBadRequest, http.StatusForbidden},
+			},
+		},
+		Outbound: &mockTransformer{},
+	}
+
+	outbound := &PersistentOutboundTransformer{
+		wrapped: &mockTransformer{},
+		state: &PersistenceState{
+			CurrentCandidate: &ChannelModelsCandidate{
+				Channel: channel,
+				Models:  []biz.ChannelModelEntry{{RequestModel: "gpt-4", ActualModel: "gpt-4"}},
+			},
+			CurrentModelIndex: 0,
+		},
+	}
+
+	require.True(t, outbound.CanRetry(&httpclient.Error{StatusCode: http.StatusBadRequest}))
+	require.True(t, outbound.CanRetry(&httpclient.Error{StatusCode: http.StatusForbidden}))
+	require.False(t, outbound.CanRetry(&httpclient.Error{StatusCode: http.StatusUnauthorized}))
 }
 
 func TestPersistentOutboundTransformer_CanRetry_429_WithMultipleModels(t *testing.T) {

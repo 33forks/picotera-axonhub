@@ -8,6 +8,10 @@ export const apiFormatSchema = z.enum([
   'openai/image_edit',
   'openai/image_variation',
   'openai/embeddings',
+  'openai/video',
+  'openai/audio_speech',
+  'openai/audio_transcriptions',
+  'openai/audio_translations',
   'anthropic/messages',
   'gemini/contents',
   'gemini/embeddings',
@@ -27,6 +31,9 @@ export const configurableChannelEndpointApiFormats = [
   'openai/image_edit',
   'openai/image_variation',
   'openai/embeddings',
+  'openai/audio_speech',
+  'openai/audio_transcriptions',
+  'openai/audio_translations',
   'anthropic/messages',
   'gemini/contents',
   'gemini/embeddings',
@@ -101,7 +108,10 @@ export const channelTypeSchema = z.enum([
   'nanogpt_responses',
   'fireworks',
   'opencode_go',
+  'opencode_go_anthropic',
   'ollama',
+  'evolink',
+  'evolink_anthropic',
 ]);
 export type ChannelType = z.infer<typeof channelTypeSchema>;
 
@@ -132,13 +142,20 @@ export const headerEntrySchema = z.object({
 export type HeaderEntry = z.infer<typeof headerEntrySchema>;
 
 // Override Operation
+export const overrideMatchSchema = z.object({
+  path: z.string().trim().min(1),
+  eq: z.string().trim().min(1),
+});
+export type OverrideMatch = z.infer<typeof overrideMatchSchema>;
+
 export const overrideOperationSchema = z.object({
-  op: z.enum(['set', 'delete', 'rename', 'copy', 'array_append', 'array_prepend', 'array_insert']),
+  op: z.enum(['set', 'delete', 'rename', 'copy', 'array_append', 'array_prepend', 'array_insert', 'array_remove']),
   path: z.string().optional(),
   from: z.string().optional(),
   to: z.string().optional(),
   value: z.any().optional(),
   condition: z.string().optional(),
+  match: overrideMatchSchema.nullish(),
   index: z.number().int().nullish(),
   splat: z.boolean().nullish(),
 });
@@ -201,6 +218,12 @@ export const channelLimiterStatsSchema = z.object({
 });
 export type ChannelLimiterStats = z.infer<typeof channelLimiterStatsSchema>;
 
+export const retryableErrorPatternSchema = z.object({
+  pattern: z.string().min(1),
+  regex: z.boolean().optional().nullable(),
+});
+export type RetryableErrorPattern = z.infer<typeof retryableErrorPatternSchema>;
+
 // Channel Settings
 export const channelSettingsSchema = z.object({
   extraModelPrefix: z.string().optional(),
@@ -216,6 +239,8 @@ export const channelSettingsSchema = z.object({
   passThroughUserAgent: z.boolean().optional().nullable(),
   passThroughBody: z.boolean().optional().nullable(),
   rateLimit: channelRateLimitSchema.optional().nullable(),
+  retryableStatusCodes: z.array(z.number().int().min(400).max(599)).optional().nullable(),
+  retryableErrorPatterns: z.array(retryableErrorPatternSchema).optional().nullable(),
 });
 
 export type ChannelSettings = z.infer<typeof channelSettingsSchema>;

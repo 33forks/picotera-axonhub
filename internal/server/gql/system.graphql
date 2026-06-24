@@ -122,6 +122,8 @@ type RetryPolicy {
   maxChannelRetries: Int!
   maxSingleChannelRetries: Int!
   retryDelayMs: Int!
+  streamFirstEventTimeoutSeconds: Int!
+  nonStreamResponseTimeoutSeconds: Int!
   loadBalancerStrategy: String!
   enabled: Boolean!
   autoDisableChannel: AutoDisableChannel!
@@ -153,6 +155,8 @@ input UpdateRetryPolicyInput {
   maxChannelRetries: Int
   maxSingleChannelRetries: Int
   retryDelayMs: Int
+  streamFirstEventTimeoutSeconds: Int
+  nonStreamResponseTimeoutSeconds: Int
   loadBalancerStrategy: String
   enabled: Boolean
   autoDisableChannel: AutoDisableChannelInput
@@ -173,6 +177,16 @@ type QuotaEnforcementSettings {
 input UpdateQuotaEnforcementSettingsInput {
   enabled: Boolean
   mode: QuotaEnforcementMode
+}
+
+type SecuritySettings {
+  blockedIPs: [String!]!
+  showRequestLogIPBanIcon: Boolean!
+}
+
+input UpdateSecuritySettingsInput {
+  blockedIPs: [String!]
+  showRequestLogIPBanIcon: Boolean
 }
 
 type SystemModelSettings {
@@ -357,7 +371,9 @@ extend type Mutation {
   updateSystemGeneralSettings(input: UpdateSystemGeneralSettingsInput!): Boolean!
   updateVideoStorageSettings(input: UpdateVideoStorageSettingsInput!): Boolean!
   updateQuotaEnforcementSettings(input: UpdateQuotaEnforcementSettingsInput!): Boolean!
+  updateSecuritySettings(input: UpdateSecuritySettingsInput!): Boolean!
   checkProviderQuotas: Boolean!
+  resetChannelQuotaNow(channelID: ID!): Boolean!
   triggerGcCleanup(input: TriggerGcCleanupInput!): Boolean!
   saveProxyPreset(input: SaveProxyPresetInput!): Boolean!
   deleteProxyPreset(url: String!): Boolean!
@@ -424,6 +440,7 @@ extend type Query {
   systemGeneralSettings: SystemGeneralSettings!
   videoStorageSettings: VideoStorageSettings!
   quotaEnforcementSettings: QuotaEnforcementSettings!
+  securitySettings: SecuritySettings!
   proxyPresets: [ProxyPreset!]!
   userAgentPassThroughSettings: UserAgentPassThroughSettings!
   passThroughSettings: PassThroughSettings!

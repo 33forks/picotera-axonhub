@@ -284,6 +284,7 @@ func NewProviderQuotaService(params ProviderQuotaServiceParams) *ProviderQuotaSe
 	svc.registerWaferSupport()
 	svc.registerSyntheticSupport()
 	svc.registerNeuralWattSupport()
+	svc.registerApertisSupport()
 
 	go svc.loadQuotaCache(context.Background())
 
@@ -326,6 +327,10 @@ func (svc *ProviderQuotaService) registerSyntheticSupport() {
 
 func (svc *ProviderQuotaService) registerNeuralWattSupport() {
 	svc.checkers["neuralwatt"] = provider_quota.NewNeuralWattQuotaChecker(svc.httpClient)
+}
+
+func (svc *ProviderQuotaService) registerApertisSupport() {
+	svc.checkers["apertis"] = provider_quota.NewApertisQuotaChecker(svc.httpClient)
 }
 
 func (svc *ProviderQuotaService) intervalToCronExpr(interval time.Duration) string {
@@ -431,6 +436,46 @@ func (svc *ProviderQuotaService) updateQuotaCache(channelID int, status provider
 // ManualCheck forces an immediate quota check for all relevant channels.
 func (svc *ProviderQuotaService) ManualCheck(ctx context.Context) {
 	svc.runQuotaCheckForce(ctx)
+}
+
+// ResetChannelQuotaNow attempts to redeem a banked reset credit for the given codex channel.
+func (svc *ProviderQuotaService) ResetChannelQuotaNow(ctx context.Context, channelID int) error {
+	ch, err := svc.db.Channel.Query().Where(channel.IDEQ(channelID)).Only(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load channel: %w", err)
+	}
+
+	if ch.Type != channel.TypeCodex {
+		return fmt.Errorf("reset is only supported for codex channels")
+	}
+
+	if !hasCredentialsForProvider(ch) {
+		return fmt.Errorf("channel has no credentials")
+	}
+
+	checker, ok := svc.checkers["codex"]
+	if !ok {
+		return fmt.Errorf("no quota checker registered for codex")
+	}
+
+	codexChecker, ok := checker.(*provider_quota.CodexQuotaChecker)
+	if !ok {
+		return fmt.Errorf("invalid codex quota checker type")
+	}
+
+	if _, err := codexChecker.ResetNow(ctx, ch); err != nil {
+		return fmt.Errorf("failed to reset codex quota: %w", err)
+	}
+
+	// Refresh the quota status immediately so the UI reflects the reset.
+	// Hold the service mutex to keep the in-memory cache consistent with the DB
+	// in case a scheduled quota check is running concurrently.
+	svc.mu.Lock()
+	now := time.Now()
+	svc.checkChannelQuota(ctx, ch, now)
+	svc.mu.Unlock()
+
+	return nil
 }
 
 func (svc *ProviderQuotaService) runQuotaCheckForce(ctx context.Context) {

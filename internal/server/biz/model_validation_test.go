@@ -400,6 +400,80 @@ func TestModelService_ValidateModelSettings(t *testing.T) {
 		require.Contains(t, err.Error(), `unsupported condition operator "gt" for stream`)
 	})
 
+	t.Run("valid content feature conditions", func(t *testing.T) {
+		fields := []string{
+			objects.ModelAssociationConditionFieldHasImage,
+			objects.ModelAssociationConditionFieldHasVideo,
+			objects.ModelAssociationConditionFieldHasDocument,
+			objects.ModelAssociationConditionFieldHasAudio,
+		}
+
+		for _, field := range fields {
+			t.Run(field, func(t *testing.T) {
+				settings := &objects.ModelSettings{
+					Associations: []*objects.ModelAssociation{
+						{
+							Type: "model",
+							When: &objects.ModelAssociationWhen{
+								Enabled: true,
+								Condition: &objects.Condition{
+									Type:  objects.ConditionTypeGroup,
+									Logic: "and",
+									Conditions: []objects.Condition{
+										{
+											Type:     objects.ConditionTypeCondition,
+											Field:    field,
+											Operator: "eq",
+											Value:    true,
+										},
+									},
+								},
+							},
+							ModelID: &objects.ModelIDAssociation{
+								ModelID: "test-model",
+							},
+						},
+					},
+				}
+
+				err := svc.validateModelSettings(settings)
+				require.NoError(t, err)
+			})
+		}
+	})
+
+	t.Run("invalid content feature condition with string value", func(t *testing.T) {
+		settings := &objects.ModelSettings{
+			Associations: []*objects.ModelAssociation{
+				{
+					Type: "model",
+					When: &objects.ModelAssociationWhen{
+						Enabled: true,
+						Condition: &objects.Condition{
+							Type:  objects.ConditionTypeGroup,
+							Logic: "and",
+							Conditions: []objects.Condition{
+								{
+									Type:     objects.ConditionTypeCondition,
+									Field:    objects.ModelAssociationConditionFieldHasImage,
+									Operator: "eq",
+									Value:    "true",
+								},
+							},
+						},
+					},
+					ModelID: &objects.ModelIDAssociation{
+						ModelID: "test-model",
+					},
+				},
+			},
+		}
+
+		err := svc.validateModelSettings(settings)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "condition value for has_image must be a boolean")
+	})
+
 	t.Run("valid combined prompt_tokens and stream condition", func(t *testing.T) {
 		settings := &objects.ModelSettings{
 			Associations: []*objects.ModelAssociation{
@@ -721,7 +795,9 @@ func TestModelService_CreateModel_WithRegexValidation(t *testing.T) {
 			ModelID:   "test-model",
 			Type:      lo.ToPtr(model.TypeChat),
 			Name:      "Test Model",
+			Icon:      "DeepSeek",
 			Group:     "test-group",
+			ModelCard: &objects.ModelCard{},
 			Settings: &objects.ModelSettings{
 				Associations: []*objects.ModelAssociation{
 					{
@@ -746,7 +822,9 @@ func TestModelService_CreateModel_WithRegexValidation(t *testing.T) {
 			ModelID:   "invalid-model",
 			Type:      lo.ToPtr(model.TypeChat),
 			Name:      "Invalid Model",
+			Icon:      "DeepSeek",
 			Group:     "test-group",
+			ModelCard: &objects.ModelCard{},
 			Settings: &objects.ModelSettings{
 				Associations: []*objects.ModelAssociation{
 					{
@@ -764,6 +842,72 @@ func TestModelService_CreateModel_WithRegexValidation(t *testing.T) {
 		require.Nil(t, model)
 		require.Contains(t, err.Error(), "invalid regex pattern")
 	})
+}
+
+func TestModelService_CreateModel_DefaultsTypeToChat(t *testing.T) {
+	client := enttest.Open(t, dialect.SQLite, "file:ent?mode=memory&_fk=0")
+	defer client.Close()
+
+	ctx := context.Background()
+	ctx = ent.NewContext(ctx, client)
+	ctx = authz.WithTestBypass(ctx)
+	svc := &ModelService{
+		AbstractService: &AbstractService{
+			db: client,
+		},
+	}
+
+	createdModel, err := svc.CreateModel(ctx, ent.CreateModelInput{
+		Developer: "test-dev",
+		ModelID:   "test-model",
+		Name:      "Test Model",
+		Icon:      "DeepSeek",
+		Group:     "test-group",
+		ModelCard: &objects.ModelCard{},
+		Settings:  &objects.ModelSettings{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, createdModel)
+	require.Equal(t, model.TypeChat, createdModel.Type)
+}
+
+func TestModelService_BulkCreateModels_DefaultsTypeToChat(t *testing.T) {
+	client := enttest.Open(t, dialect.SQLite, "file:ent?mode=memory&_fk=0")
+	defer client.Close()
+
+	ctx := context.Background()
+	ctx = ent.NewContext(ctx, client)
+	ctx = authz.WithTestBypass(ctx)
+	svc := &ModelService{
+		AbstractService: &AbstractService{
+			db: client,
+		},
+	}
+
+	createdModels, err := svc.BulkCreateModels(ctx, []*ent.CreateModelInput{
+		{
+			Developer: "test-dev",
+			ModelID:   "test-model-a",
+			Name:      "Test Model A",
+			Icon:      "DeepSeek",
+			Group:     "test-group",
+			ModelCard: &objects.ModelCard{},
+			Settings:  &objects.ModelSettings{},
+		},
+		{
+			Developer: "test-dev",
+			ModelID:   "test-model-b",
+			Name:      "Test Model B",
+			Icon:      "DeepSeek",
+			Group:     "test-group",
+			ModelCard: &objects.ModelCard{},
+			Settings:  &objects.ModelSettings{},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, createdModels, 2)
+	require.Equal(t, model.TypeChat, createdModels[0].Type)
+	require.Equal(t, model.TypeChat, createdModels[1].Type)
 }
 
 func TestModelService_UpdateModel_WithRegexValidation(t *testing.T) {
@@ -785,7 +929,10 @@ func TestModelService_UpdateModel_WithRegexValidation(t *testing.T) {
 		ModelID:   "test-model",
 		Type:      lo.ToPtr(model.TypeChat),
 		Name:      "Test Model",
+		Icon:      "DeepSeek",
 		Group:     "test-group",
+		ModelCard: &objects.ModelCard{},
+		Settings:  &objects.ModelSettings{},
 	})
 	require.NoError(t, err)
 
