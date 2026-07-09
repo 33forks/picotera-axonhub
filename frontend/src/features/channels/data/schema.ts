@@ -57,6 +57,7 @@ export const channelTypeSchema = z.enum([
   'openai',
   'openai_responses',
   'atlascloud',
+  'cline',
   'codex',
   'anthropic',
   'anthropic_aws',
@@ -224,10 +225,21 @@ export const retryableErrorPatternSchema = z.object({
 });
 export type RetryableErrorPattern = z.infer<typeof retryableErrorPatternSchema>;
 
+export const openCodeGoQuotaSettingsSchema = z.object({
+  workspaceId: z.string().optional().nullable(),
+  authCookie: z.string().optional().nullable(),
+});
+export type OpenCodeGoQuotaSettings = z.infer<typeof openCodeGoQuotaSettingsSchema>;
+
+export const channelProviderQuotaSettingsSchema = z.object({
+  opencodeGo: openCodeGoQuotaSettingsSchema.optional().nullable(),
+});
+export type ChannelProviderQuotaSettings = z.infer<typeof channelProviderQuotaSettingsSchema>;
+
 // Channel Settings
 export const channelSettingsSchema = z.object({
   extraModelPrefix: z.string().optional(),
-  modelMappings: z.array(modelMappingSchema).nullable(),
+  modelMappings: z.array(modelMappingSchema).optional().nullable(),
   autoTrimedModelPrefixes: z.array(z.string()).optional().nullable(),
   hideOriginalModels: z.boolean().optional(),
   hideMappedModels: z.boolean().optional(),
@@ -241,6 +253,7 @@ export const channelSettingsSchema = z.object({
   rateLimit: channelRateLimitSchema.optional().nullable(),
   retryableStatusCodes: z.array(z.number().int().min(400).max(599)).optional().nullable(),
   retryableErrorPatterns: z.array(retryableErrorPatternSchema).optional().nullable(),
+  providerQuota: channelProviderQuotaSettingsSchema.optional().nullable(),
 });
 
 export type ChannelSettings = z.infer<typeof channelSettingsSchema>;
