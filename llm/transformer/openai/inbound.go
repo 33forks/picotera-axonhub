@@ -171,9 +171,14 @@ func isReasoningSignatureEvent(resp *llm.Response) bool {
 	hasReasoningContent := delta.ReasoningContent != nil && *delta.ReasoningContent != ""
 	hasToolCalls := len(delta.ToolCalls) > 0
 	hasRefusal := delta.Refusal != ""
+	// A pure-signature event may still be the terminal chunk: Gemini emits
+	// finishReason on an otherwise empty event. Keep such events so the OpenAI
+	// stream retains its finish_reason (and usage); only skip events that
+	// carry neither content nor a finish reason.
+	hasFinishReason := resp.Choices[0].FinishReason != nil && *resp.Choices[0].FinishReason != ""
 
 	// Only skip if ONLY ReasoningSignature is present (pure signature event)
-	return !hasContent && !hasReasoningContent && !hasToolCalls && !hasRefusal
+	return !hasContent && !hasReasoningContent && !hasToolCalls && !hasRefusal && !hasFinishReason
 }
 
 func (t *InboundTransformer) AggregateStreamChunks(
