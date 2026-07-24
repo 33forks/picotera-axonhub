@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { X, RefreshCw, Search, ChevronLeft, ChevronRight, PanelLeft, Plus, Trash2, Eye, EyeOff, Copy, Play, Info } from 'lucide-react';
+import { X, RefreshCw, Search, ChevronLeft, ChevronRight, PanelLeft, Plus, Trash2, Eye, EyeOff, Copy, Play, Info, Ban } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -25,6 +25,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { AutoCompleteSelect } from '@/components/auto-complete-select';
 import { SelectDropdown } from '@/components/select-dropdown';
 import { useProxyPresets, useSaveProxyPreset } from '@/features/system/data/system';
+import { usePermissions } from '@/hooks/usePermissions';
 import { antigravityOAuthExchange, antigravityOAuthStart } from '../data/antigravity';
 import {
   useCreateChannel,
@@ -34,6 +35,8 @@ import {
   useAllChannelNames,
   useAllChannelTags,
   useChannelDisabledAPIKeys,
+  useDisableChannelAPIKey,
+  useEnableChannelAPIKey,
   useSyncChannelModels,
 } from '../data/channels';
 import { claudecodeOAuthExchange, claudecodeOAuthStart } from '../data/claudecode';
@@ -330,6 +333,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const { data: allTags = [], isLoading: isLoadingTags } = useAllChannelTags();
   const { data: proxyPresets = [] } = useProxyPresets();
   const saveProxyPreset = useSaveProxyPreset();
+  const { hasSystemScope } = usePermissions();
   const [supportedModels, setSupportedModels] = useState<string[]>(() => initialRow?.supportedModels || []);
   const [manualModels, setManualModels] = useState<string[]>(() => initialRow?.manualModels || []);
   const [newModel, setNewModel] = useState('');
@@ -356,6 +360,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const [selectedKeysToRemove, setSelectedKeysToRemove] = useState<Set<string>>(new Set());
   const [confirmRemoveSelectedOpen, setConfirmRemoveSelectedOpen] = useState(false);
   const [confirmRemoveKey, setConfirmRemoveKey] = useState<string | null>(null);
+  const [confirmDisableKey, setConfirmDisableKey] = useState<string | null>(null);
   const [showOpenCodeGoAuthCookie, setShowOpenCodeGoAuthCookie] = useState(false);
   const [authMode, setAuthMode] = useState<'official' | 'auth-json' | 'third-party'>('official');
   const [codexAuthJSONText, setCodexAuthJSONText] = useState('');
@@ -515,6 +520,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
       setSelectedKeysToRemove(new Set());
       setConfirmRemoveSelectedOpen(false);
       setConfirmRemoveKey(null);
+      setConfirmDisableKey(null);
       setShowOpenCodeGoAuthCookie(false);
       setPatternError(null);
       setFetchedModels([]);
@@ -718,11 +724,20 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
   const apiKeysCount = useMemo(() => (apiKeys || []).filter((k) => k.trim().length > 0).length, [apiKeys]);
   const isSubmitting = createChannel.isPending || duplicateChannel.isPending || updateChannel.isPending;
 
-  const { data: disabledKeys = [] } = useChannelDisabledAPIKeys(currentRow?.id || '', {
+  const { data: disabledKeys = [], isFetching: isFetchingDisabledKeys } = useChannelDisabledAPIKeys(currentRow?.id || '', {
     enabled: isEdit && !!currentRow?.id && showApiKeysPanel,
   });
 
   const disabledKeySet = useMemo(() => new Set(disabledKeys.map((dk) => dk.key)), [disabledKeys]);
+
+  // Keys that exist in the backend (used to hide disable/enable button for unsaved new keys)
+  const savedAPIKeySet = useMemo(
+    () => new Set((currentRow?.credentials?.apiKeys || []).filter((k) => k.trim().length > 0)),
+    [currentRow?.credentials?.apiKeys]
+  );
+
+  const disableAPIKey = useDisableChannelAPIKey();
+  const enableAPIKey = useEnableChannelAPIKey();
 
   useEffect(() => {
     if (!open || !isDuplicate || !duplicateFromRow) return;
@@ -1182,7 +1197,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
           };
 
       const shouldUseProtocolDefaultBaseURL =
-        (isCodexType && (!isEdit || authMode === 'official' || authMode === 'auth-json')) ||
+        (isCodexType && (authMode === 'official' || authMode === 'auth-json')) ||
         (isClaudeCodeType && authMode === 'official' && !isDuplicate);
       if (shouldUseProtocolDefaultBaseURL) {
         const currentType = selectedType || derivedChannelType;
@@ -1268,7 +1283,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
         }
 
         // Auto-save proxy preset (preserve existing name if available)
-        if (proxyType === ProxyType.URL && proxyUrl) {
+        if (hasSystemScope('write_settings') && proxyType === ProxyType.URL && proxyUrl) {
           const existingPreset = proxyPresets.find((p) => p.url === proxyUrl);
           saveProxyPreset.mutate({
             name: existingPreset?.name,
@@ -1565,6 +1580,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
     setSelectedKeysToRemove(new Set());
     setConfirmRemoveSelectedOpen(false);
     setConfirmRemoveKey(null);
+    setConfirmDisableKey(null);
   }, []);
 
   const removeApiKeys = useCallback(
@@ -1665,6 +1681,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
             setSelectedKeysToRemove(new Set());
             setConfirmRemoveSelectedOpen(false);
             setConfirmRemoveKey(null);
+            setConfirmDisableKey(null);
             setShowApiKey(false);
             setShowOpenCodeGoAuthCookie(false);
             // Reset proxy state
@@ -2947,6 +2964,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                     {(() => {
                       const validKeys = (apiKeys || []).map((k) => k.trim()).filter((k) => k.length > 0);
                       const isLastKey = validKeys.length <= 1;
+                      const enabledKeysCount = validKeys.filter((k) => savedAPIKeySet.has(k) && !disabledKeySet.has(k)).length;
                       return validKeys
                         .filter((k) => {
                           if (!apiKeysSearch.trim()) return true;
@@ -2956,6 +2974,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                         .map((key) => {
                           const isSelected = selectedKeysToRemove.has(key);
                           const isDisabled = disabledKeySet.has(key);
+                          const isSavedKey = savedAPIKeySet.has(key);
                           const masked = key.length > 8 ? `${key.slice(0, 4)}****${key.slice(-4)}` : `****${key.slice(-4)}`;
 
                           return (
@@ -2993,50 +3012,133 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                                 </div>
                               </div>
 
-                              {isLastKey ? (
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <span className='inline-flex'>
-                                      <Button
-                                        type='button'
-                                        variant='ghost'
-                                        size='sm'
-                                        className='text-muted-foreground h-7 w-7 p-0'
-                                        disabled
-                                      >
+                              <div className='flex items-center gap-1'>
+                                {/* Disable / Enable button — only for keys saved in backend */}
+                                {isSavedKey &&
+                                  (isDisabled ? (
+                                    <Popover
+                                      open={confirmDisableKey === key}
+                                      onOpenChange={(isOpen) => setConfirmDisableKey(isOpen ? key : null)}
+                                    >
+                                      <PopoverTrigger asChild>
+                                        <Button type='button' variant='ghost' size='sm' className='h-7 w-7 p-0'>
+                                          <RefreshCw className='h-4 w-4' />
+                                        </Button>
+                                      </PopoverTrigger>
+                                      <PopoverContent className='w-72'>
+                                        <div className='flex flex-col gap-3'>
+                                          <p className='text-sm'>{t('channels.dialogs.fields.apiKey.confirmEnable')}</p>
+                                          <div className='flex justify-end gap-2'>
+                                            <Button size='sm' variant='outline' onClick={() => setConfirmDisableKey(null)}>
+                                              {t('common.buttons.cancel')}
+                                            </Button>
+                                            <Button
+                                              size='sm'
+                                              onClick={async () => {
+                                                if (!currentRow?.id) return;
+                                                await enableAPIKey.mutateAsync({ channelID: currentRow.id, key });
+                                                setConfirmDisableKey(null);
+                                              }}
+                                            >
+                                              {t('common.buttons.confirm')}
+                                            </Button>
+                                          </div>
+                                        </div>
+                                      </PopoverContent>
+                                    </Popover>
+                                  ) : enabledKeysCount <= 1 ? (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className='inline-flex'>
+                                          <Button type='button' variant='ghost' size='sm' className='text-muted-foreground h-7 w-7 p-0' disabled>
+                                            <Ban className='h-4 w-4' />
+                                          </Button>
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <p>{t('channels.dialogs.fields.apiKey.mustKeepOneEnabled')}</p>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  ) : (
+                                    <Popover
+                                      open={confirmDisableKey === key}
+                                      onOpenChange={(isOpen) => setConfirmDisableKey(isOpen ? key : null)}
+                                    >
+                                      <PopoverTrigger asChild>
+                                        <Button type='button' variant='ghost' size='sm' className='text-orange-500 h-7 w-7 p-0' disabled={disableAPIKey.isPending || isFetchingDisabledKeys}>
+                                          <Ban className='h-4 w-4' />
+                                        </Button>
+                                      </PopoverTrigger>
+                                      <PopoverContent className='w-72'>
+                                        <div className='flex flex-col gap-3'>
+                                          <p className='text-sm'>{t('channels.dialogs.fields.apiKey.confirmDisable')}</p>
+                                          <div className='flex justify-end gap-2'>
+                                            <Button size='sm' variant='outline' onClick={() => setConfirmDisableKey(null)}>
+                                              {t('common.buttons.cancel')}
+                                            </Button>
+                                            <Button
+                                              size='sm'
+                                              disabled={disableAPIKey.isPending || isFetchingDisabledKeys}
+                                              onClick={async () => {
+                                                if (!currentRow?.id) return;
+                                                await disableAPIKey.mutateAsync({ channelID: currentRow.id, key });
+                                                setConfirmDisableKey(null);
+                                              }}
+                                            >
+                                              {t('common.buttons.confirm')}
+                                            </Button>
+                                          </div>
+                                        </div>
+                                      </PopoverContent>
+                                    </Popover>
+                                  ))}
+
+                                {/* Delete button */}
+                                {isLastKey ? (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <span className='inline-flex'>
+                                        <Button
+                                          type='button'
+                                          variant='ghost'
+                                          size='sm'
+                                          className='text-muted-foreground h-7 w-7 p-0'
+                                          disabled
+                                        >
+                                          <Trash2 className='h-4 w-4' />
+                                        </Button>
+                                      </span>
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      <p>{t('channels.dialogs.fields.apiKey.mustKeepOne')}</p>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                ) : (
+                                  <Popover
+                                    open={confirmRemoveKey === key}
+                                    onOpenChange={(isOpen) => setConfirmRemoveKey(isOpen ? key : null)}
+                                  >
+                                    <PopoverTrigger asChild>
+                                      <Button type='button' variant='ghost' size='sm' className='text-destructive h-7 w-7 p-0'>
                                         <Trash2 className='h-4 w-4' />
                                       </Button>
-                                    </span>
-                                  </TooltipTrigger>
-                                  <TooltipContent>
-                                    <p>{t('channels.dialogs.fields.apiKey.mustKeepOne')}</p>
-                                  </TooltipContent>
-                                </Tooltip>
-                              ) : (
-                                <Popover
-                                  open={confirmRemoveKey === key}
-                                  onOpenChange={(isOpen) => setConfirmRemoveKey(isOpen ? key : null)}
-                                >
-                                  <PopoverTrigger asChild>
-                                    <Button type='button' variant='ghost' size='sm' className='text-destructive h-7 w-7 p-0'>
-                                      <Trash2 className='h-4 w-4' />
-                                    </Button>
-                                  </PopoverTrigger>
-                                  <PopoverContent className='w-72'>
-                                    <div className='flex flex-col gap-3'>
-                                      <p className='text-sm'>{t('channels.dialogs.fields.apiKey.confirmRemoveSingle')}</p>
-                                      <div className='flex justify-end gap-2'>
-                                        <Button size='sm' variant='outline' onClick={() => setConfirmRemoveKey(null)}>
-                                          {t('common.buttons.cancel')}
-                                        </Button>
-                                        <Button size='sm' variant='destructive' onClick={() => removeApiKeys([key])}>
-                                          {t('common.buttons.confirm')}
-                                        </Button>
+                                    </PopoverTrigger>
+                                    <PopoverContent className='w-72'>
+                                      <div className='flex flex-col gap-3'>
+                                        <p className='text-sm'>{t('channels.dialogs.fields.apiKey.confirmRemoveSingle')}</p>
+                                        <div className='flex justify-end gap-2'>
+                                          <Button size='sm' variant='outline' onClick={() => setConfirmRemoveKey(null)}>
+                                            {t('common.buttons.cancel')}
+                                          </Button>
+                                          <Button size='sm' variant='destructive' onClick={() => removeApiKeys([key])}>
+                                            {t('common.buttons.confirm')}
+                                          </Button>
+                                        </div>
                                       </div>
-                                    </div>
-                                  </PopoverContent>
-                                </Popover>
-                              )}
+                                    </PopoverContent>
+                                  </Popover>
+                                )}
+                              </div>
                             </div>
                           );
                         });
@@ -3079,6 +3181,7 @@ export function ChannelsActionDialog({ currentRow, duplicateFromRow, open, onOpe
                       setSelectedKeysToRemove(new Set());
                       setConfirmRemoveSelectedOpen(false);
                       setConfirmRemoveKey(null);
+                      setConfirmDisableKey(null);
                     }}
                     disabled={selectedKeysToRemove.size === 0}
                   >

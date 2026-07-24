@@ -111,6 +111,7 @@ export const channelTypeSchema = z.enum([
   'opencode_go',
   'opencode_go_anthropic',
   'ollama',
+  'ollama_anthropic',
   'evolink',
   'evolink_anthropic',
 ]);
@@ -150,7 +151,7 @@ export const overrideMatchSchema = z.object({
 export type OverrideMatch = z.infer<typeof overrideMatchSchema>;
 
 export const overrideOperationSchema = z.object({
-  op: z.enum(['set', 'delete', 'rename', 'copy', 'array_append', 'array_prepend', 'array_insert', 'array_remove']),
+  op: z.enum(['set', 'set_if_absent', 'delete', 'rename', 'copy', 'array_append', 'array_prepend', 'array_insert', 'array_remove']),
   path: z.string().optional(),
   from: z.string().optional(),
   to: z.string().optional(),
@@ -172,14 +173,22 @@ export const proxyConfigSchema = z.object({
   url: z.string().optional(),
   username: z.string().optional(),
   password: z.string().optional(),
+  disableConnectionReuse: z.boolean().optional(),
 });
 export type ProxyConfig = z.infer<typeof proxyConfigSchema>;
 
 // Transform Options
+export const reasoningEffortMappingSchema = z.object({
+  from: z.string().min(1),
+  to: z.string().min(1),
+});
+export type ReasoningEffortMapping = z.infer<typeof reasoningEffortMappingSchema>;
+
 export const transformOptionsSchema = z.object({
   forceArrayInstructions: z.boolean().optional(),
   forceArrayInputs: z.boolean().optional(),
   replaceDeveloperRoleWithSystem: z.boolean().optional(),
+  reasoningEffortMapping: z.array(reasoningEffortMappingSchema).nullish(),
 });
 export type TransformOptions = z.infer<typeof transformOptionsSchema>;
 
@@ -398,8 +407,44 @@ export const modelPriceItemSchema = z.object({
 });
 export type ModelPriceItem = z.infer<typeof modelPriceItemSchema>;
 
+// Time-based price schedule schemas
+// DailyTimeRange uses "HH:mm" format strings (e.g. "03:00", "18:30")
+export const dailyTimeRangeSchema = z.object({
+  start: z.string(),
+  end: z.string(),
+});
+export type DailyTimeRange = z.infer<typeof dailyTimeRangeSchema>;
+
+export const dateRangeSchema = z.object({
+  start: z.string(),
+  end: z.string(),
+});
+export type DateRange = z.infer<typeof dateRangeSchema>;
+
+export const overrideWhenSchema = z.object({
+  dailyTime: dailyTimeRangeSchema.optional().nullable(),
+  weekdays: z.array(z.number().int().min(1).max(7)).optional().nullable(),
+  dateRange: dateRangeSchema.optional().nullable(),
+});
+export type OverrideWhen = z.infer<typeof overrideWhenSchema>;
+
+export const priceOverrideSchema = z.object({
+  name: z.string(),
+  priority: z.number().int(),
+  when: overrideWhenSchema,
+  items: z.array(modelPriceItemSchema),
+});
+export type PriceOverride = z.infer<typeof priceOverrideSchema>;
+
+export const priceScheduleSchema = z.object({
+  timezone: z.string(),
+  overrides: z.array(priceOverrideSchema),
+});
+export type PriceSchedule = z.infer<typeof priceScheduleSchema>;
+
 export const modelPriceSchema = z.object({
   items: z.array(modelPriceItemSchema),
+  schedule: priceScheduleSchema.optional().nullable(),
 });
 export type ModelPrice = z.infer<typeof modelPriceSchema>;
 

@@ -22,6 +22,7 @@ import {
   bulkUpdateChannelOrderingResultSchema,
   channelSummaryConnectionSchema,
   ChannelSettings,
+  ProxyConfig,
   ChannelPolicies,
   ChannelModelPrice,
   SaveChannelModelPriceInput,
@@ -98,11 +99,13 @@ const CREATE_CHANNEL_MUTATION = `
           url
           username
           password
+          disableConnectionReuse
         }
         transformOptions {
           forceArrayInstructions
           forceArrayInputs
           replaceDeveloperRoleWithSystem
+          reasoningEffortMapping { from to }
         }
         passThroughUserAgent
         passThroughBody
@@ -170,11 +173,13 @@ const DUPLICATE_CHANNEL_MUTATION = `
           url
           username
           password
+          disableConnectionReuse
         }
         transformOptions {
           forceArrayInstructions
           forceArrayInputs
           replaceDeveloperRoleWithSystem
+          reasoningEffortMapping { from to }
         }
         passThroughUserAgent
         passThroughBody
@@ -242,11 +247,13 @@ const BULK_CREATE_CHANNELS_MUTATION = `
           url
           username
           password
+          disableConnectionReuse
         }
         transformOptions {
           forceArrayInstructions
           forceArrayInputs
           replaceDeveloperRoleWithSystem
+          reasoningEffortMapping { from to }
         }
         passThroughUserAgent
         passThroughBody
@@ -314,11 +321,13 @@ const UPDATE_CHANNEL_MUTATION = `
           url
           username
           password
+          disableConnectionReuse
         }
         transformOptions {
           forceArrayInstructions
           forceArrayInputs
           replaceDeveloperRoleWithSystem
+          reasoningEffortMapping { from to }
         }
         passThroughUserAgent
         passThroughBody
@@ -508,6 +517,7 @@ const BULK_IMPORT_CHANNELS_MUTATION = `
             forceArrayInstructions
             forceArrayInputs
             replaceDeveloperRoleWithSystem
+            reasoningEffortMapping { from to }
           }
           passThroughUserAgent
           passThroughBody
@@ -615,6 +625,38 @@ const GET_CHANNEL_MODEL_PRICES_QUERY = `
               }
             }
           }
+          schedule {
+            timezone
+            overrides {
+              name
+              priority
+              when {
+                dailyTime {
+                  start
+                  end
+                }
+                weekdays
+                dateRange {
+                  start
+                  end
+                }
+              }
+              items {
+                itemCode
+                pricing {
+                  mode
+                  flatFee
+                  usagePerUnit
+                  usageTiered {
+                    tiers {
+                      upTo
+                      pricePerUnit
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -705,6 +747,7 @@ const BULK_UPDATE_CHANNEL_ORDERING_MUTATION = `
             forceArrayInstructions
             forceArrayInputs
             replaceDeveloperRoleWithSystem
+            reasoningEffortMapping { from to }
           }
           passThroughUserAgent
           passThroughBody
@@ -849,11 +892,13 @@ const QUERY_CHANNELS_QUERY = `
               url
               username
               password
+              disableConnectionReuse
             }
             transformOptions {
               forceArrayInstructions
               forceArrayInputs
               replaceDeveloperRoleWithSystem
+              reasoningEffortMapping { from to }
             }
             passThroughUserAgent
             passThroughBody
@@ -1393,7 +1438,7 @@ export function useTestChannel(options?: { silent?: boolean }) {
     }: {
       channelID: string;
       modelID?: string;
-      proxy?: { type: string; url?: string; username?: string; password?: string };
+      proxy?: ProxyConfig;
     }) => {
       try {
         const data = await graphqlRequest<{
