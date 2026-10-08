@@ -189,24 +189,16 @@ func TestAggregateStreamChunks_WithCitations(t *testing.T) {
 	require.NotNil(t, got.Choices[0].Message.Content.Content)
 	require.Equal(t, "The meaning of life is...", *got.Choices[0].Message.Content.Content)
 
-	// Verify citations are aggregated and deduplicated
-	require.NotNil(t, got.TransformerMetadata)
-	citationsRaw, ok := got.TransformerMetadata[TransformerMetadataKeyCitations]
-	require.True(t, ok)
+	// Verify citations are aggregated, deduplicated, and projected to the
+	// top-level citations field — the same wire position used by the streaming
+	// chunks themselves and by the direct non-streaming path (ResponseFromLLM) —
+	// without leaking the internal transformer_metadata envelope, which is
+	// documented as never serialized.
+	require.NotContains(t, string(gotBytes), "transformer_metadata")
 
-	// After JSON marshaling/unmarshaling, the citations will be []interface{}
-	citationsSlice, ok := citationsRaw.([]any)
-	require.True(t, ok)
-	require.Len(t, citationsSlice, 2)
-
-	// Convert to []string for easier assertion
-	citations := make([]string, len(citationsSlice))
-	for i, v := range citationsSlice {
-		citations[i] = v.(string)
-	}
-
-	require.Contains(t, citations, "https://example.com/source1")
-	require.Contains(t, citations, "https://example.com/source2")
+	var gotResp Response
+	require.NoError(t, json.Unmarshal(gotBytes, &gotResp))
+	require.Equal(t, []string{"https://example.com/source1", "https://example.com/source2"}, gotResp.Citations)
 }
 
 func TestAggregateStreamChunks_WithoutCitations(t *testing.T) {
@@ -418,6 +410,41 @@ func TestAggregateStreamChunks_PreservesEmptyReasoningContent(t *testing.T) {
 	require.NotNil(t, got.Choices[0].Message)
 	require.NotNil(t, got.Choices[0].Message.ReasoningContent, "empty reasoning_content must be preserved")
 	require.Equal(t, "", *got.Choices[0].Message.ReasoningContent)
+}
+
+// TestAggregateStreamChunks_TopLevelReasoningTokens verifies that a provider
+// emitting reasoning tokens as a top-level `reasoning_tokens` field (SGLang
+// shape, with no nested completion_tokens_details) has the value merged into
+// the aggregated usage's CompletionTokensDetails.
+func TestAggregateStreamChunks_TopLevelReasoningTokens(t *testing.T) {
+	chunks := []*httpclient.StreamEvent{
+		{
+			Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":0,"model":"qwen38-27b","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello"},"finish_reason":null}]}`),
+		},
+		{
+			Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":0,"model":"qwen38-27b","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`),
+		},
+		{
+			Data: []byte(`{"id":"chatcmpl-1","object":"chat.completion.chunk","created":0,"model":"qwen38-27b","choices":[],"usage":{"prompt_tokens":17680,"completion_tokens":266,"total_tokens":17946,"prompt_tokens_details":{"cached_tokens":2304},"reasoning_tokens":97}}`),
+		},
+	}
+
+	gotBytes, meta, err := AggregateStreamChunks(context.Background(), chunks, DefaultTransformChunk)
+	require.NoError(t, err)
+
+	var got llm.Response
+	err = json.Unmarshal(gotBytes, &got)
+	require.NoError(t, err)
+
+	require.NotNil(t, meta.Usage)
+	require.NotNil(t, meta.Usage.CompletionTokensDetails)
+	require.Equal(t, int64(97), meta.Usage.CompletionTokensDetails.ReasoningTokens)
+
+	require.NotNil(t, got.Usage)
+	require.NotNil(t, got.Usage.CompletionTokensDetails)
+	require.Equal(t, int64(97), got.Usage.CompletionTokensDetails.ReasoningTokens)
+	require.NotNil(t, got.Usage.PromptTokensDetails)
+	require.Equal(t, int64(2304), got.Usage.PromptTokensDetails.CachedTokens)
 }
 
 // TestAggregateStreamChunks_OmitsReasoningContentWhenAbsent verifies that when no

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"time"
 
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/pkg/xcache"
@@ -48,6 +49,18 @@ func (m *mockMetricsProvider) GetChannelMetrics(ctx context.Context, channelID i
 	return &biz.AggregatedMetrics{}, nil
 }
 
+func (m *mockMetricsProvider) IncrementChannelSelection(channelID int) {
+	metrics, ok := m.metrics[channelID]
+	if !ok {
+		metrics = &biz.AggregatedMetrics{}
+		m.metrics[channelID] = metrics
+	}
+
+	metrics.RequestCount++
+	now := time.Now()
+	metrics.LastSelectedAt = &now
+}
+
 type mockRetryPolicyProvider struct {
 	policy *biz.RetryPolicy
 }
@@ -66,24 +79,6 @@ func (m *mockSelectionTracker) IncrementChannelSelection(channelID int) {
 	}
 
 	m.selections[channelID]++
-}
-
-// mockTraceProvider is a mock implementation of ChannelTraceProvider for testing.
-type mockTraceProvider struct {
-	lastSuccessChannel map[int]int // traceID -> channelID
-	err                error
-}
-
-func (m *mockTraceProvider) GetLastSuccessfulChannelID(ctx context.Context, traceID int) (int, error) {
-	if m.err != nil {
-		return 0, m.err
-	}
-
-	if channelID, ok := m.lastSuccessChannel[traceID]; ok {
-		return channelID, nil
-	}
-
-	return 0, nil
 }
 
 // newTestChannelService creates a minimal channel service for testing.
@@ -114,5 +109,5 @@ func newTestRequestService(client *ent.Client) *biz.RequestService {
 	channelService := biz.NewChannelServiceForTest(client)
 	usageLogService := biz.NewUsageLogService(client, systemService, channelService)
 
-	return biz.NewRequestService(client, systemService, usageLogService, dataStorageService, biz.NewLiveStreamRegistry())
+	return biz.NewRequestService(client, systemService.CacheConfig, systemService, usageLogService, dataStorageService, biz.NewLiveStreamRegistry())
 }

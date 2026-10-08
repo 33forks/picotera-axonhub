@@ -67,6 +67,7 @@ type TransformOptions {
 type SyncChannelModelsPayload {
   channelID: ID!
   supportedModels: [String!]!
+  manualModels: [String!]!
 }
 
 input ReasoningEffortMappingInput {
@@ -114,6 +115,24 @@ input SaveChannelEndpointsInput {
   endpoints: [ChannelEndpointInput!]!
 }
 
+# DetectChannelEndpoints probes the upstream for the relay protocols a channel
+# can expose (chat completions, responses, messages) without persisting them.
+input DetectChannelEndpointsInput {
+  channelID: ID!
+  model: String
+}
+
+type DetectedChannelEndpoint {
+  apiFormat: String!
+  supported: Boolean!
+  statusCode: Int
+  reason: String!
+}
+
+type DetectChannelEndpointsPayload {
+  endpoints: [DetectedChannelEndpoint!]!
+}
+
 input ProxyConfigInput {
   type: ProxyType!
   url: String
@@ -132,22 +151,46 @@ input RetryableErrorPatternInput {
   regex: Boolean
 }
 
-type OpenCodeGoQuotaSettings {
-  workspaceId: String
+type ModelProtocol {
+  model: String!
+  apiFormats: [String!]!
+  enabled: Boolean
+}
+
+input ModelProtocolInput {
+  model: String!
+  apiFormats: [String!]!
+  enabled: Boolean
+}
+
+# ProviderQuota carries credentials used only for provider quota polling
+# (e.g. the Command Code account session cookie). These are sensitive: the
+# output resolver only returns them to operators with write_channels, and the
+# values are never part of ordinary channel reads.
+type CommandCodeQuotaSettings {
   authCookie: String
 }
 
-input OpenCodeGoQuotaSettingsInput {
-  workspaceId: String
+input CommandCodeQuotaSettingsInput {
+  authCookie: String
+}
+
+type OllamaQuotaSettings {
+  authCookie: String
+}
+
+input OllamaQuotaSettingsInput {
   authCookie: String
 }
 
 type ChannelProviderQuotaSettings {
-  opencodeGo: OpenCodeGoQuotaSettings
+  commandCode: CommandCodeQuotaSettings
+  ollama: OllamaQuotaSettings
 }
 
 input ChannelProviderQuotaSettingsInput {
-  opencodeGo: OpenCodeGoQuotaSettingsInput
+  commandCode: CommandCodeQuotaSettingsInput
+  ollama: OllamaQuotaSettingsInput
 }
 
 type ChannelSettings {
@@ -166,7 +209,16 @@ type ChannelSettings {
   rateLimit: ChannelRateLimit
   retryableStatusCodes: [Int!]
   retryableErrorPatterns: [RetryableErrorPattern!]
-  providerQuota: ChannelProviderQuotaSettings
+  modelProtocols: [ModelProtocol!]
+  providerQuota: ChannelProviderQuotaSettings @goField(forceResolver: true)
+  quotaRoutingMode: ChannelQuotaRoutingMode
+}
+
+enum ChannelQuotaRoutingMode {
+  INHERIT
+  IGNORE_QUOTA
+  REMOVE_ON_EXHAUSTED
+  BACKPRESSURE
 }
 
 enum CapabilityPolicy {
@@ -175,12 +227,49 @@ enum CapabilityPolicy {
   forbid
 }
 
+enum APIKeyAutoDisableAction {
+  temporary_disable
+  disable_until_cron
+  permanent_disable
+  permanent_disable_delete
+}
+
+enum APIKeyAutoDisableMode {
+  inherit
+  custom
+  off
+}
+
+type APIKeyAutoDisableRule {
+  statusCodes: [Int!]
+  keywordPatterns: [String!]
+  times: Int!
+  action: APIKeyAutoDisableAction!
+  disableDurationMinutes: Int
+  disableUntilCron: String
+  disableUntilTimezone: String
+}
+
+input APIKeyAutoDisableRuleInput {
+  statusCodes: [Int!]
+  keywordPatterns: [String!]
+  times: Int!
+  action: APIKeyAutoDisableAction!
+  disableDurationMinutes: Int
+  disableUntilCron: String
+  disableUntilTimezone: String
+}
+
 type ChannelPolicies {
   stream: CapabilityPolicy
+  apiKeyAutoDisableMode: APIKeyAutoDisableMode
+  apiKeyAutoDisableRules: [APIKeyAutoDisableRule!]
 }
 
 input ChannelPoliciesInput {
   stream: CapabilityPolicy
+  apiKeyAutoDisableMode: APIKeyAutoDisableMode
+  apiKeyAutoDisableRules: [APIKeyAutoDisableRuleInput!]
 }
 
 input ModelMappingInput {
@@ -204,7 +293,9 @@ input ChannelSettingsInput {
   rateLimit: ChannelRateLimitInput
   retryableStatusCodes: [Int!]
   retryableErrorPatterns: [RetryableErrorPatternInput!]
+  modelProtocols: [ModelProtocolInput!]
   providerQuota: ChannelProviderQuotaSettingsInput
+  quotaRoutingMode: ChannelQuotaRoutingMode
 }
 
 input ChannelRateLimitInput {
@@ -235,6 +326,7 @@ type DisabledAPIKey {
   disabledAt: Time!
   errorCode: Int!
   reason: String
+  expiresAt: Time
 }
 
 type OAuthCredentials {
@@ -257,6 +349,7 @@ input ChannelCredentialsInput {
   apiKeys: [String!]
   gcp: GCPCredentialInput
   oauth: OAuthCredentialsInput
+  managementApiKey: String
 }
 
 input OAuthCredentialsInput {
@@ -364,6 +457,24 @@ type BulkUpdateChannelOrderingResult {
   channels: [Channel!]!
 }
 
+enum BulkAutoDisableAction {
+  write_rules
+  inherit
+  off
+}
+
+input BulkUpdateChannelAutoDisableInput {
+  channelIDs: [ID!]!
+  action: BulkAutoDisableAction!
+  rules: [APIKeyAutoDisableRuleInput!]
+}
+
+type BulkUpdateChannelAutoDisablePayload {
+  success: Boolean!
+  updated: Int!
+  channels: [Channel!]!
+}
+
 input UpdateAPIKeyProfilesInput {
   activeProfile: String!
   profiles: [APIKeyProfileInput!]
@@ -371,6 +482,8 @@ input UpdateAPIKeyProfilesInput {
 
 input APIKeyProfileInput {
   name: String!
+  templateID: Int
+  templateName: String
   modelMappings: [ModelMappingInput!]
   channelIDs: [Int!]
   channelTags: [String!]
@@ -378,6 +491,7 @@ input APIKeyProfileInput {
   modelIDs: [String!]
   quota: APIKeyQuotaInput
   loadBalanceStrategy: String
+  traceStickyMode: String
 }
 
 input UpdateProjectProfilesInput {
@@ -415,6 +529,8 @@ type APIKeyProfiles {
 
 type APIKeyProfile {
   name: String!
+  templateID: Int
+  templateName: String
   modelMappings: [ModelMapping!]
   channelIDs: [Int!]
   channelTags: [String!]
@@ -422,6 +538,7 @@ type APIKeyProfile {
   modelIDs: [String!]
   quota: APIKeyQuota
   loadBalanceStrategy: String
+  traceStickyMode: String
 }
 
 enum ChannelTagsMatchMode {
@@ -431,8 +548,10 @@ enum ChannelTagsMatchMode {
 }
 
 # ApiKeyProfileTemplate uses the Ent-generated type and input types from ent.graphql
-
-
+extend type APIKeyProfileTemplate {
+  """Number of API key profiles that currently follow this template."""
+  linkedProfilesCount: Int!
+}
 
 # Load template input - custom input for loading template to API key
 input LoadApiKeyProfileTemplateInput {
@@ -821,6 +940,7 @@ type Mutation {
   bulkCreateChannels(input: BulkCreateChannelsInput!): [Channel!]!
   updateChannel(id: ID!, input: UpdateChannelInput!): Channel!
   saveChannelEndpoints(input: SaveChannelEndpointsInput!): Channel!
+  detectChannelEndpoints(input: DetectChannelEndpointsInput!): DetectChannelEndpointsPayload!
   updateChannelStatus(id: ID!, status: ChannelStatus!): Channel!
   deleteChannel(id: ID!): Boolean!
   bulkArchiveChannels(ids: [ID!]!): Boolean!
@@ -828,6 +948,9 @@ type Mutation {
   bulkEnableChannels(ids: [ID!]!): Boolean!
   bulkRecoverChannels(ids: [ID!]!): Boolean!
   bulkDeleteChannels(ids: [ID!]!): Boolean!
+  bulkAddChannelTags(ids: [ID!]!, tags: [String!]!): Boolean!
+  bulkRemoveChannelTags(ids: [ID!]!, tags: [String!]!): Boolean!
+  bulkManageChannelTags(ids: [ID!]!, addTags: [String!]!, removeTags: [String!]!): Boolean!
   testChannel(input: TestChannelInput!): TestChannelPayload!
   testChannelAPIKeys(channelID: ID!, modelID: String): TestChannelAPIKeysPayload!
   testChannelAPIKey(channelID: ID!, key: String!, modelID: String): TestAPIKeyResult!
@@ -835,6 +958,9 @@ type Mutation {
   bulkUpdateChannelOrdering(
     input: BulkUpdateChannelOrderingInput!
   ): BulkUpdateChannelOrderingResult!
+  bulkUpdateChannelAutoDisable(
+    input: BulkUpdateChannelAutoDisableInput!
+  ): BulkUpdateChannelAutoDisablePayload!
 
   # Channel API Key Management
   disableChannelAPIKey(channelID: ID!, key: String!): Boolean!

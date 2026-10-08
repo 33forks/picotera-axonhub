@@ -13,6 +13,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/channelmodelpriceversion"
 	"github.com/looplj/axonhub/internal/ent/channeloverridetemplate"
 	"github.com/looplj/axonhub/internal/ent/datastorage"
+	"github.com/looplj/axonhub/internal/ent/invitation"
 	"github.com/looplj/axonhub/internal/ent/model"
 	"github.com/looplj/axonhub/internal/ent/oidcidentity"
 	"github.com/looplj/axonhub/internal/ent/project"
@@ -87,6 +88,10 @@ func init() {
 	apikeyDescProfiles := apikeyFields[7].Descriptor()
 	// apikey.DefaultProfiles holds the default value on creation for the profiles field.
 	apikey.DefaultProfiles = apikeyDescProfiles.Default.(*objects.APIKeyProfiles)
+	// apikeyDescAllowedIps is the schema descriptor for allowed_ips field.
+	apikeyDescAllowedIps := apikeyFields[8].Descriptor()
+	// apikey.DefaultAllowedIps holds the default value on creation for the allowed_ips field.
+	apikey.DefaultAllowedIps = apikeyDescAllowedIps.Default.([]string)
 	apikeyprofiletemplateMixin := schema.APIKeyProfileTemplate{}.Mixin()
 	apikeyprofiletemplate.Policy = privacy.NewPolicies(schema.APIKeyProfileTemplate{})
 	apikeyprofiletemplate.Hooks[0] = func(next ent.Mutator) ent.Mutator {
@@ -198,7 +203,7 @@ func init() {
 	// channel.DefaultOrderingWeight holds the default value on creation for the ordering_weight field.
 	channel.DefaultOrderingWeight = channelDescOrderingWeight.Default.(int)
 	// channelDescEndpoints is the schema descriptor for endpoints field.
-	channelDescEndpoints := channelFields[17].Descriptor()
+	channelDescEndpoints := channelFields[19].Descriptor()
 	// channel.DefaultEndpoints holds the default value on creation for the endpoints field.
 	channel.DefaultEndpoints = channelDescEndpoints.Default.([]objects.ChannelEndpoint)
 	channelmodelpriceMixin := schema.ChannelModelPrice{}.Mixin()
@@ -354,6 +359,49 @@ func init() {
 	datastorageDescPrimary := datastorageFields[2].Descriptor()
 	// datastorage.DefaultPrimary holds the default value on creation for the primary field.
 	datastorage.DefaultPrimary = datastorageDescPrimary.Default.(bool)
+	invitationMixin := schema.Invitation{}.Mixin()
+	invitation.Policy = privacy.NewPolicies(schema.Invitation{})
+	invitation.Hooks[0] = func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if err := invitation.Policy.EvalMutation(ctx, m); err != nil {
+				return nil, err
+			}
+			return next.Mutate(ctx, m)
+		})
+	}
+	invitationMixinHooks1 := invitationMixin[1].Hooks()
+
+	invitation.Hooks[1] = invitationMixinHooks1[0]
+	invitationMixinInters1 := invitationMixin[1].Interceptors()
+	invitation.Interceptors[0] = invitationMixinInters1[0]
+	invitationMixinFields0 := invitationMixin[0].Fields()
+	_ = invitationMixinFields0
+	invitationMixinFields1 := invitationMixin[1].Fields()
+	_ = invitationMixinFields1
+	invitationFields := schema.Invitation{}.Fields()
+	_ = invitationFields
+	// invitationDescCreatedAt is the schema descriptor for created_at field.
+	invitationDescCreatedAt := invitationMixinFields0[0].Descriptor()
+	// invitation.DefaultCreatedAt holds the default value on creation for the created_at field.
+	invitation.DefaultCreatedAt = invitationDescCreatedAt.Default.(func() time.Time)
+	// invitationDescUpdatedAt is the schema descriptor for updated_at field.
+	invitationDescUpdatedAt := invitationMixinFields0[1].Descriptor()
+	// invitation.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	invitation.DefaultUpdatedAt = invitationDescUpdatedAt.Default.(func() time.Time)
+	// invitation.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	invitation.UpdateDefaultUpdatedAt = invitationDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// invitationDescDeletedAt is the schema descriptor for deleted_at field.
+	invitationDescDeletedAt := invitationMixinFields1[0].Descriptor()
+	// invitation.DefaultDeletedAt holds the default value on creation for the deleted_at field.
+	invitation.DefaultDeletedAt = invitationDescDeletedAt.Default.(int)
+	// invitationDescMaxUses is the schema descriptor for max_uses field.
+	invitationDescMaxUses := invitationFields[4].Descriptor()
+	// invitation.DefaultMaxUses holds the default value on creation for the max_uses field.
+	invitation.DefaultMaxUses = invitationDescMaxUses.Default.(int)
+	// invitationDescUsedCount is the schema descriptor for used_count field.
+	invitationDescUsedCount := invitationFields[5].Descriptor()
+	// invitation.DefaultUsedCount holds the default value on creation for the used_count field.
+	invitation.DefaultUsedCount = invitationDescUsedCount.Default.(int)
 	modelMixin := schema.Model{}.Mixin()
 	model.Policy = privacy.NewPolicies(schema.Model{})
 	model.Hooks[0] = func(next ent.Mutator) ent.Mutator {
@@ -578,6 +626,10 @@ func init() {
 	providerquotastatusDescReady := providerquotastatusFields[5].Descriptor()
 	// providerquotastatus.DefaultReady holds the default value on creation for the ready field.
 	providerquotastatus.DefaultReady = providerquotastatusDescReady.Default.(bool)
+	// providerquotastatusDescAccountKey is the schema descriptor for account_key field.
+	providerquotastatusDescAccountKey := providerquotastatusFields[7].Descriptor()
+	// providerquotastatus.DefaultAccountKey holds the default value on creation for the account_key field.
+	providerquotastatus.DefaultAccountKey = providerquotastatusDescAccountKey.Default.(string)
 	requestMixin := schema.Request{}.Mixin()
 	request.Policy = privacy.NewPolicies(schema.Request{})
 	request.Hooks[0] = func(next ent.Mutator) ent.Mutator {
@@ -603,27 +655,31 @@ func init() {
 	// request.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
 	request.UpdateDefaultUpdatedAt = requestDescUpdatedAt.UpdateDefault.(func() time.Time)
 	// requestDescProjectID is the schema descriptor for project_id field.
-	requestDescProjectID := requestFields[1].Descriptor()
+	requestDescProjectID := requestFields[2].Descriptor()
 	// request.DefaultProjectID holds the default value on creation for the project_id field.
 	request.DefaultProjectID = requestDescProjectID.Default.(int)
 	// requestDescFormat is the schema descriptor for format field.
-	requestDescFormat := requestFields[7].Descriptor()
+	requestDescFormat := requestFields[8].Descriptor()
 	// request.DefaultFormat holds the default value on creation for the format field.
 	request.DefaultFormat = requestDescFormat.Default.(string)
 	// requestDescExternalID is the schema descriptor for external_id field.
-	requestDescExternalID := requestFields[13].Descriptor()
+	requestDescExternalID := requestFields[15].Descriptor()
 	// request.ExternalIDValidator is a validator for the "external_id" field. It is called by the builders before save.
 	request.ExternalIDValidator = requestDescExternalID.Validators[0].(func(string) error)
 	// requestDescStream is the schema descriptor for stream field.
-	requestDescStream := requestFields[15].Descriptor()
+	requestDescStream := requestFields[17].Descriptor()
 	// request.DefaultStream holds the default value on creation for the stream field.
 	request.DefaultStream = requestDescStream.Default.(bool)
 	// requestDescClientIP is the schema descriptor for client_ip field.
-	requestDescClientIP := requestFields[16].Descriptor()
+	requestDescClientIP := requestFields[18].Descriptor()
 	// request.DefaultClientIP holds the default value on creation for the client_ip field.
 	request.DefaultClientIP = requestDescClientIP.Default.(string)
+	// requestDescUserAgent is the schema descriptor for user_agent field.
+	requestDescUserAgent := requestFields[19].Descriptor()
+	// request.DefaultUserAgent holds the default value on creation for the user_agent field.
+	request.DefaultUserAgent = requestDescUserAgent.Default.(string)
 	// requestDescContentSaved is the schema descriptor for content_saved field.
-	requestDescContentSaved := requestFields[20].Descriptor()
+	requestDescContentSaved := requestFields[23].Descriptor()
 	// request.DefaultContentSaved holds the default value on creation for the content_saved field.
 	request.DefaultContentSaved = requestDescContentSaved.Default.(bool)
 	requestexecutionMixin := schema.RequestExecution{}.Mixin()
@@ -646,19 +702,23 @@ func init() {
 	// requestexecution.DefaultProjectID holds the default value on creation for the project_id field.
 	requestexecution.DefaultProjectID = requestexecutionDescProjectID.Default.(int)
 	// requestexecutionDescExternalID is the schema descriptor for external_id field.
-	requestexecutionDescExternalID := requestexecutionFields[4].Descriptor()
+	requestexecutionDescExternalID := requestexecutionFields[5].Descriptor()
 	// requestexecution.ExternalIDValidator is a validator for the "external_id" field. It is called by the builders before save.
 	requestexecution.ExternalIDValidator = requestexecutionDescExternalID.Validators[0].(func(string) error)
 	// requestexecutionDescFormat is the schema descriptor for format field.
-	requestexecutionDescFormat := requestexecutionFields[6].Descriptor()
+	requestexecutionDescFormat := requestexecutionFields[8].Descriptor()
 	// requestexecution.DefaultFormat holds the default value on creation for the format field.
 	requestexecution.DefaultFormat = requestexecutionDescFormat.Default.(string)
+	// requestexecutionDescChannelAPIKeySuffix is the schema descriptor for channel_api_key_suffix field.
+	requestexecutionDescChannelAPIKeySuffix := requestexecutionFields[10].Descriptor()
+	// requestexecution.ChannelAPIKeySuffixValidator is a validator for the "channel_api_key_suffix" field. It is called by the builders before save.
+	requestexecution.ChannelAPIKeySuffixValidator = requestexecutionDescChannelAPIKeySuffix.Validators[0].(func(string) error)
 	// requestexecutionDescStream is the schema descriptor for stream field.
-	requestexecutionDescStream := requestexecutionFields[13].Descriptor()
+	requestexecutionDescStream := requestexecutionFields[18].Descriptor()
 	// requestexecution.DefaultStream holds the default value on creation for the stream field.
 	requestexecution.DefaultStream = requestexecutionDescStream.Default.(bool)
 	// requestexecutionDescPassThroughApplied is the schema descriptor for pass_through_applied field.
-	requestexecutionDescPassThroughApplied := requestexecutionFields[19].Descriptor()
+	requestexecutionDescPassThroughApplied := requestexecutionFields[24].Descriptor()
 	// requestexecution.DefaultPassThroughApplied holds the default value on creation for the pass_through_applied field.
 	requestexecution.DefaultPassThroughApplied = requestexecutionDescPassThroughApplied.Default.(bool)
 	roleMixin := schema.Role{}.Mixin()

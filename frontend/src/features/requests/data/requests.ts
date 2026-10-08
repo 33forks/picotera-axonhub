@@ -14,12 +14,16 @@ import {
 } from './schema';
 
 // Dynamic GraphQL query builder
-function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChannels: boolean }) {
+function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChannels: boolean; canViewCallerUser: boolean }) {
   const apiKeyFields = permissions.canViewApiKeys
     ? `
           apiKey {
             id
-            name
+            name${permissions.canViewCallerUser ? `
+            user {
+              firstName
+              lastName
+            }` : ''}
           }`
     : '';
 
@@ -36,7 +40,8 @@ function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChann
                   channel {
                     id
                     name
-                  }`
+                  }
+                  channelAPIKeyIndex`
     : '';
 
   return `
@@ -61,25 +66,24 @@ function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChann
             stream
             status
             clientIP
+            userAgent
             metricsLatencyMs
             metricsFirstTokenLatencyMs
             metricsReasoningDurationMs
             executions(first: 10, orderBy: { field: CREATED_AT, direction: DESC }) {
               edges {
                 node {
+                  id
+                  createdAt
                   modelID
+                  upstreamModelID
+                  format
                   status
+                  reasoningEffort
                   passThroughApplied${executionChannelFields}
                 }
                 cursor
               }
-              pageInfo {
-                hasNextPage
-                hasPreviousPage
-                startCursor
-                endCursor
-              }
-              totalCount
             }
             usageLogs(first: 1) {
               edges {
@@ -104,18 +108,21 @@ function buildRequestsQuery(permissions: { canViewApiKeys: boolean; canViewChann
           startCursor
           endCursor
         }
-        totalCount
       }
     }
   `;
 }
 
-function buildRequestDetailQuery(permissions: { canViewApiKeys: boolean; canViewChannels: boolean }) {
+function buildRequestDetailQuery(permissions: { canViewApiKeys: boolean; canViewChannels: boolean; canViewCallerUser: boolean }) {
   const apiKeyFields = permissions.canViewApiKeys
     ? `
           apiKey {
             id
-            name
+            name${permissions.canViewCallerUser ? `
+            user {
+              firstName
+              lastName
+            }` : ''}
         }`
     : '';
 
@@ -143,6 +150,7 @@ function buildRequestDetailQuery(permissions: { canViewApiKeys: boolean; canView
           contentSaved
           contentStorageKey
           requestHeaders
+          responseHeaders
           requestBody
           responseBody
           responseChunks
@@ -169,12 +177,16 @@ function buildRequestDetailQuery(permissions: { canViewApiKeys: boolean; canView
   `;
 }
 
-function buildRequestDetailPollingQuery(permissions: { canViewApiKeys: boolean; canViewChannels: boolean }) {
+function buildRequestDetailPollingQuery(permissions: { canViewApiKeys: boolean; canViewChannels: boolean; canViewCallerUser: boolean }) {
   const apiKeyFields = permissions.canViewApiKeys
     ? `
           apiKey {
             id
-            name
+            name${permissions.canViewCallerUser ? `
+            user {
+              firstName
+              lastName
+            }` : ''}
         }`
     : '';
 
@@ -201,6 +213,7 @@ function buildRequestDetailPollingQuery(permissions: { canViewApiKeys: boolean; 
           dataStorageID
           contentSaved
           contentStorageKey
+          responseHeaders
           status
           format
           metricsReasoningDurationMs
@@ -218,7 +231,9 @@ function buildRequestExecutionsQuery(permissions: { canViewChannels: boolean }) 
                   name
                   type
                   baseURL
-              }`
+              }
+              channelAPIKeySuffix
+              channelAPIKeyIndex`
     : '';
 
   return `
@@ -239,9 +254,11 @@ function buildRequestExecutionsQuery(permissions: { canViewChannels: boolean }) 
                 updatedAt
                 requestID${channelFields}
                 modelID
+                upstreamModelID
                 projectID
                 dataStorageID
                 requestHeaders
+                responseHeaders
                 requestBody
                 responseBody
                 responseChunks
@@ -249,6 +266,7 @@ function buildRequestExecutionsQuery(permissions: { canViewChannels: boolean }) 
                 responseStatusCode
                 status
                 format
+                reasoningEffort
                 stream
                 requestURL
                 passThroughApplied
@@ -409,7 +427,7 @@ export async function fetchAdjacentRequestPage(params: {
   direction: 'older' | 'newer';
   pageSize: number;
   where?: Record<string, any>;
-  permissions: { canViewApiKeys: boolean; canViewChannels: boolean };
+  permissions: { canViewApiKeys: boolean; canViewChannels: boolean; canViewCallerUser: boolean };
   projectId?: string | null;
 }): Promise<{ requests: Request[]; pageInfo: RequestConnection['pageInfo'] }> {
   const query = buildRequestsQuery(params.permissions);

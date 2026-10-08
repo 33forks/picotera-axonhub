@@ -24,6 +24,10 @@ type APIKey implements Node {
   """
   scopes: [String!]
   profiles: APIKeyProfiles
+  """
+  IP CIDR allowlist for this API key. If non-empty, only requests from matching source IPs are accepted.
+  """
+  allowedIps: [String!]
   user: User @goField(forceResolver: true)
   project: Project!
   requests(
@@ -107,6 +111,7 @@ Properties by which APIKey connections can be ordered.
 enum APIKeyOrderField {
   CREATED_AT
   UPDATED_AT
+  NAME
 }
 type APIKeyProfileTemplate implements Node {
   id: ID!
@@ -417,12 +422,20 @@ type Channel implements Node {
   tags: [String!]
   defaultTestModel: String!
   policies: ChannelPolicies @goField(forceResolver: true)
-  settings: ChannelSettings
+  settings: ChannelSettings @goField(forceResolver: true)
   """
   Ordering weight for display sorting
   """
   orderingWeight: Int!
   errorMessage: String
+  """
+  Set when the channel was disabled automatically, and cleared when it recovers; distinguishes an automatic disable from an operator one.
+  """
+  autoDisabledAt: Time
+  """
+  When set together with auto_disabled_at, the cleanup task re-enables the channel after this instant. Operator disables leave this null.
+  """
+  autoDisableExpiresAt: Time
   """
   User-defined remark or note for the channel
   """
@@ -1285,6 +1298,8 @@ enum ChannelType @goModel(model: "github.com/looplj/axonhub/internal/ent/channel
   xiaomi
   xiaomi_anthropic
   xai
+  xai_responses
+  xai_subscription
   ppio
   siliconflow
   volcengine
@@ -1298,6 +1313,7 @@ enum ChannelType @goModel(model: "github.com/looplj/axonhub/internal/ent/channel
   burncloud
   modelscope
   bailian
+  bailian_responses
   bailian_anthropic
   moonshot_coding
   jina
@@ -1314,6 +1330,17 @@ enum ChannelType @goModel(model: "github.com/looplj/axonhub/internal/ent/channel
   ollama_anthropic
   evolink
   evolink_anthropic
+  groq
+  qiniu_anthropic
+  fenno
+  zenmux
+  zenmux_responses
+  zenmux_anthropic
+  zenmux_gemini
+  zenmux_video
+  commandcode
+  commandcode_anthropic
+  typesafe
 }
 """
 ChannelWhereInput is used for filtering Channel objects.
@@ -1473,6 +1500,32 @@ input ChannelWhereInput {
   errorMessageEqualFold: String
   errorMessageContainsFold: String
   """
+  auto_disabled_at field predicates
+  """
+  autoDisabledAt: Time
+  autoDisabledAtNEQ: Time
+  autoDisabledAtIn: [Time!]
+  autoDisabledAtNotIn: [Time!]
+  autoDisabledAtGT: Time
+  autoDisabledAtGTE: Time
+  autoDisabledAtLT: Time
+  autoDisabledAtLTE: Time
+  autoDisabledAtIsNil: Boolean
+  autoDisabledAtNotNil: Boolean
+  """
+  auto_disable_expires_at field predicates
+  """
+  autoDisableExpiresAt: Time
+  autoDisableExpiresAtNEQ: Time
+  autoDisableExpiresAtIn: [Time!]
+  autoDisableExpiresAtNotIn: [Time!]
+  autoDisableExpiresAtGT: Time
+  autoDisableExpiresAtGTE: Time
+  autoDisableExpiresAtLT: Time
+  autoDisableExpiresAtLTE: Time
+  autoDisableExpiresAtIsNil: Boolean
+  autoDisableExpiresAtNotNil: Boolean
+  """
   remark field predicates
   """
   remark: String
@@ -1535,6 +1588,10 @@ input CreateAPIKeyInput {
   API Key specific scopes. For user type: default read_channels, write_requests (immutable). For service_account: custom scopes.
   """
   scopes: [String!]
+  """
+  IP CIDR allowlist for this API key. If non-empty, only requests from matching source IPs are accepted.
+  """
+  allowedIps: [String!]
   projectID: ID!
 }
 """
@@ -1784,12 +1841,17 @@ input CreateRequestInput {
   """
   requestHeaders: JSONRawMessageInput
   requestBody: JSONRawMessageInput!
+  """
+  Response headers sent to the client, with sensitive values masked
+  """
+  responseHeaders: JSONRawMessageInput
   responseBody: JSONRawMessageInput
   responseChunks: [JSONRawMessageInput!]
   externalID: String
   status: RequestStatus!
   stream: Boolean
   clientIP: String
+  userAgent: String
   metricsLatencyMs: Int
   metricsFirstTokenLatencyMs: Int
   """
@@ -3690,6 +3752,10 @@ type ProviderQuotaStatus implements Node {
   Timestamp for next scheduled quota check
   """
   nextCheckAt: Time!
+  """
+  Quota account identity shared by channels drawing from the same provider account (e.g. the same ZenMux management key). Empty means the channel has its own quota account. Never stores the raw credential.
+  """
+  accountKey: String
   channel: Channel!
 }
 """
@@ -3718,6 +3784,8 @@ ProviderQuotaStatusProviderType is enum for the field provider_type
 enum ProviderQuotaStatusProviderType @goModel(model: "github.com/looplj/axonhub/internal/ent/providerquotastatus.ProviderType") {
   claudecode
   codex
+  antigravity
+  xai_subscription
   github_copilot
   nanogpt
   cline
@@ -3729,6 +3797,11 @@ enum ProviderQuotaStatusProviderType @goModel(model: "github.com/looplj/axonhub/
   kimi_code
   minimax
   zhipu
+  zai
+  charm_hyper
+  zenmux
+  commandcode
+  ollama
 }
 """
 ProviderQuotaStatusStatus is enum for the field status
@@ -3830,6 +3903,24 @@ input ProviderQuotaStatusWhereInput {
   nextCheckAtGTE: Time
   nextCheckAtLT: Time
   nextCheckAtLTE: Time
+  """
+  account_key field predicates
+  """
+  accountKey: String
+  accountKeyNEQ: String
+  accountKeyIn: [String!]
+  accountKeyNotIn: [String!]
+  accountKeyGT: String
+  accountKeyGTE: String
+  accountKeyLT: String
+  accountKeyLTE: String
+  accountKeyContains: String
+  accountKeyHasPrefix: String
+  accountKeyHasSuffix: String
+  accountKeyIsNil: Boolean
+  accountKeyNotNil: Boolean
+  accountKeyEqualFold: String
+  accountKeyContainsFold: String
   """
   channel edge predicates
   """
@@ -4415,6 +4506,10 @@ type Request implements Node {
   """
   requestHeaders: JSONRawMessage
   requestBody: JSONRawMessage! @goField(forceResolver: true)
+  """
+  Response headers sent to the client, with sensitive values masked
+  """
+  responseHeaders: JSONRawMessage
   responseBody: JSONRawMessage @goField(forceResolver: true)
   responseChunks: [JSONRawMessage!] @goField(forceResolver: true)
   channelID: ID
@@ -4422,6 +4517,7 @@ type Request implements Node {
   status: RequestStatus!
   stream: Boolean!
   clientIP: String!
+  userAgent: String!
   metricsLatencyMs: Int
   metricsFirstTokenLatencyMs: Int
   """
@@ -4550,13 +4646,36 @@ type RequestExecution implements Node {
   requestID: ID!
   channelID: ID
   """
+  1-based position of the channel API key used for this execution
+  """
+  channelAPIKeyIndex: Int @goField(forceResolver: true)
+  """
   Data Storage ID that this request belongs to
   """
   dataStorageID: ID
   externalID: String
+  """
+  Channel model ID selected after model mapping, used for routing and pricing. May differ from the final wire model and the upstream-reported model.
+  """
   modelID: String!
+  """
+  Raw model reported by the upstream provider response, before client-model rewrite
+  """
+  upstreamModelID: String
   format: String!
+  """
+  Final reasoning effort sent to the upstream provider
+  """
+  reasoningEffort: String
+  """
+  Last 4 characters of the channel API key used for this execution
+  """
+  channelAPIKeySuffix: String @goField(forceResolver: true)
   requestBody: JSONRawMessage! @goField(forceResolver: true)
+  """
+  Response headers received from the upstream provider, with sensitive values masked
+  """
+  responseHeaders: JSONRawMessage
   responseBody: JSONRawMessage @goField(forceResolver: true)
   responseChunks: [JSONRawMessage!] @goField(forceResolver: true)
   errorMessage: String
@@ -4760,6 +4879,24 @@ input RequestExecutionWhereInput {
   modelIDEqualFold: String
   modelIDContainsFold: String
   """
+  upstream_model_id field predicates
+  """
+  upstreamModelID: String
+  upstreamModelIDNEQ: String
+  upstreamModelIDIn: [String!]
+  upstreamModelIDNotIn: [String!]
+  upstreamModelIDGT: String
+  upstreamModelIDGTE: String
+  upstreamModelIDLT: String
+  upstreamModelIDLTE: String
+  upstreamModelIDContains: String
+  upstreamModelIDHasPrefix: String
+  upstreamModelIDHasSuffix: String
+  upstreamModelIDIsNil: Boolean
+  upstreamModelIDNotNil: Boolean
+  upstreamModelIDEqualFold: String
+  upstreamModelIDContainsFold: String
+  """
   format field predicates
   """
   format: String
@@ -4775,6 +4912,24 @@ input RequestExecutionWhereInput {
   formatHasSuffix: String
   formatEqualFold: String
   formatContainsFold: String
+  """
+  reasoning_effort field predicates
+  """
+  reasoningEffort: String
+  reasoningEffortNEQ: String
+  reasoningEffortIn: [String!]
+  reasoningEffortNotIn: [String!]
+  reasoningEffortGT: String
+  reasoningEffortGTE: String
+  reasoningEffortLT: String
+  reasoningEffortLTE: String
+  reasoningEffortContains: String
+  reasoningEffortHasPrefix: String
+  reasoningEffortHasSuffix: String
+  reasoningEffortIsNil: Boolean
+  reasoningEffortNotNil: Boolean
+  reasoningEffortEqualFold: String
+  reasoningEffortContainsFold: String
   """
   error_message field predicates
   """
@@ -5121,6 +5276,22 @@ input RequestWhereInput {
   clientIPHasSuffix: String
   clientIPEqualFold: String
   clientIPContainsFold: String
+  """
+  user_agent field predicates
+  """
+  userAgent: String
+  userAgentNEQ: String
+  userAgentIn: [String!]
+  userAgentNotIn: [String!]
+  userAgentGT: String
+  userAgentGTE: String
+  userAgentLT: String
+  userAgentLTE: String
+  userAgentContains: String
+  userAgentHasPrefix: String
+  userAgentHasSuffix: String
+  userAgentEqualFold: String
+  userAgentContainsFold: String
   """
   metrics_latency_ms field predicates
   """
@@ -5986,6 +6157,12 @@ input UpdateAPIKeyInput {
   scopes: [String!]
   appendScopes: [String!]
   clearScopes: Boolean
+  """
+  IP CIDR allowlist for this API key. If non-empty, only requests from matching source IPs are accepted.
+  """
+  allowedIps: [String!]
+  appendAllowedIps: [String!]
+  clearAllowedIps: Boolean
 }
 """
 UpdateAPIKeyProfileTemplateInput is used for update APIKeyProfileTemplate object.
@@ -6251,6 +6428,12 @@ input UpdateRequestInput {
   requestHeaders: JSONRawMessageInput
   appendRequestHeaders: JSONRawMessageInput
   clearRequestHeaders: Boolean
+  """
+  Response headers sent to the client, with sensitive values masked
+  """
+  responseHeaders: JSONRawMessageInput
+  appendResponseHeaders: JSONRawMessageInput
+  clearResponseHeaders: Boolean
   responseBody: JSONRawMessageInput
   appendResponseBody: JSONRawMessageInput
   clearResponseBody: Boolean

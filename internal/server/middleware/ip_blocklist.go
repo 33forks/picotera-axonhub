@@ -35,32 +35,12 @@ func WithIPBlocklist(systemService *biz.SystemService) gin.HandlerFunc {
 }
 
 func clientIPCandidates(c *gin.Context) []string {
-	candidates := make([]string, 0, 3)
-	seen := make(map[string]struct{}, 3)
-	add := func(value string) {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			return
-		}
-
-		if _, ok := seen[value]; ok {
-			return
-		}
-
-		seen[value] = struct{}{}
-		candidates = append(candidates, value)
+	clientIP := strings.TrimSpace(c.ClientIP())
+	if clientIP == "" {
+		return nil
 	}
 
-	add(c.ClientIP())
-
-	if xff := c.Request.Header.Get("X-Forwarded-For"); xff != "" {
-		before, _, _ := strings.Cut(xff, ",")
-		add(before)
-	}
-
-	add(c.Request.Header.Get("X-Real-IP"))
-
-	return candidates
+	return []string{clientIP}
 }
 
 func isBlockedIP(clientIPs []string, blockedIPs []string) bool {
@@ -93,7 +73,12 @@ func isBlockedAddr(clientAddr netip.Addr, blockedIPs []string) bool {
 				continue
 			}
 
-			if prefix.Contains(clientAddr) {
+			// Only prefixes within the IPv4-mapped address space can be
+			// represented as IPv4 prefixes without changing their range.
+			if prefix.Addr().Is4In6() && prefix.Bits() >= 96 {
+				prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
+			}
+			if prefix.Contains(clientAddr) || prefix.Contains(clientAddr.Unmap()) {
 				return true
 			}
 
@@ -106,7 +91,23 @@ func isBlockedAddr(clientAddr netip.Addr, blockedIPs []string) bool {
 			continue
 		}
 
-		if blockedAddr == clientAddr {
+		if blockedAddr.Unmap() == clientAddr.Unmap() {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isAnyAllowedIP(clientIPs []string, allowedIPs []string) bool {
+	for _, clientIP := range clientIPs {
+		clientAddr, err := netip.ParseAddr(clientIP)
+		if err != nil {
+			log.Warn(context.Background(), "failed to parse client IP", log.String("client_ip", clientIP), log.Cause(err))
+			continue
+		}
+
+		if isBlockedAddr(clientAddr, allowedIPs) {
 			return true
 		}
 	}

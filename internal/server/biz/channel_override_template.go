@@ -11,6 +11,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/channel"
 	"github.com/looplj/axonhub/internal/ent/channeloverridetemplate"
 	"github.com/looplj/axonhub/internal/objects"
+	"github.com/looplj/axonhub/internal/pkg/xerrors"
 )
 
 // ChannelOverrideTemplateService handles CRUD and application of channel override templates.
@@ -62,6 +63,12 @@ func (svc *ChannelOverrideTemplateService) CreateTemplate(
 		SetBodyOverrideOperations(input.BodyOverrideOperations).
 		Save(ctx)
 	if err != nil {
+		// Name uniqueness is enforced by the (user_id, name, deleted_at) unique
+		// index; surface a friendly error instead of a raw constraint violation.
+		if ent.IsConstraintError(err) {
+			return nil, xerrors.DuplicateNameError("Template", input.Name)
+		}
+
 		return nil, fmt.Errorf("failed to create channel override template: %w", err)
 	}
 
@@ -120,6 +127,13 @@ func (svc *ChannelOverrideTemplateService) UpdateTemplate(
 
 	template, err := mut.Save(ctx)
 	if err != nil {
+		// Renaming onto another template's name violates the
+		// (user_id, name, deleted_at) unique index; report it as a name conflict
+		// so the client can show which name is already taken.
+		if ent.IsConstraintError(err) && input.Name != nil {
+			return nil, xerrors.DuplicateNameError("Template", *input.Name)
+		}
+
 		return nil, fmt.Errorf("failed to update channel override template: %w", err)
 	}
 
@@ -233,7 +247,7 @@ func (svc *ChannelOverrideTemplateService) ApplyTemplate(
 	}
 
 	if svc.channelService != nil {
-		svc.channelService.asyncReloadChannels()
+		svc.channelService.reloadChannelsAfterCommit(ctx)
 	}
 
 	return updated, nil
@@ -290,7 +304,7 @@ func (svc *ChannelOverrideTemplateService) ClearTemplates(
 	}
 
 	if svc.channelService != nil {
-		svc.channelService.asyncReloadChannels()
+		svc.channelService.reloadChannelsAfterCommit(ctx)
 	}
 
 	return updated, nil
@@ -330,47 +344,40 @@ func getBodyOverrideOperations(settings *objects.ChannelSettings) []objects.Over
 }
 
 // MergeOverrideOperations merges existing body operations with template operations.
-// - For set/set_if_absent/delete ops, matching is by Path. Template overrides existing.
+// - For set/set_if_absent/delete ops, template paths replace matching existing operations.
+// - Template operations remain ordered because multiple conditions at the same path are meaningful.
 // - For rename/copy and array_* ops, they are always appended (multiple of the same path are meaningful).
 // - Existing ops not mentioned in the template are preserved.
 func MergeOverrideOperations(existing, template []objects.OverrideOperation) []objects.OverrideOperation {
 	result := make([]objects.OverrideOperation, 0, len(existing)+len(template))
-	result = append(result, existing...)
+	templateOpsByPath := make(map[string][]objects.OverrideOperation, len(template))
+	for _, op := range template {
+		if isReplacingBodyOverrideOperation(op.Op) {
+			templateOpsByPath[op.Path] = append(templateOpsByPath[op.Path], op)
+		}
+	}
+
+	emittedTemplatePaths := make(map[string]struct{}, len(templateOpsByPath))
+	for _, op := range existing {
+		if isReplacingBodyOverrideOperation(op.Op) {
+			if replacements, ok := templateOpsByPath[op.Path]; ok {
+				if _, emitted := emittedTemplatePaths[op.Path]; !emitted {
+					result = append(result, replacements...)
+					emittedTemplatePaths[op.Path] = struct{}{}
+				}
+				continue
+			}
+		}
+		result = append(result, op)
+	}
 
 	for _, op := range template {
-		if !isReplacingBodyOverrideOperation(op.Op) {
-			result = append(result, op)
-			continue
-		}
-
-		result = replaceBodyOverrideOperation(result, op)
-	}
-
-	return result
-}
-
-func replaceBodyOverrideOperation(result []objects.OverrideOperation, replacement objects.OverrideOperation) []objects.OverrideOperation {
-	found := false
-	writeIndex := 0
-
-	for _, op := range result {
-		if isReplacingBodyOverrideOperation(op.Op) && op.Path == replacement.Path {
-			if !found {
-				result[writeIndex] = replacement
-				writeIndex++
-				found = true
+		if isReplacingBodyOverrideOperation(op.Op) {
+			if _, emitted := emittedTemplatePaths[op.Path]; emitted {
+				continue
 			}
-
-			continue
 		}
-
-		result[writeIndex] = op
-		writeIndex++
-	}
-
-	result = result[:writeIndex]
-	if !found {
-		result = append(result, replacement)
+		result = append(result, op)
 	}
 
 	return result

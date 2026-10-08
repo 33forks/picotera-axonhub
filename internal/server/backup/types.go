@@ -13,6 +13,7 @@ import (
 type BackupData struct {
 	Version            string                     `json:"version"`
 	Timestamp          time.Time                  `json:"timestamp"`
+	SystemConfigs      []*BackupSystemConfig      `json:"system_configs,omitempty"`
 	Projects           []*BackupProject           `json:"projects,omitempty"`
 	Channels           []*BackupChannel           `json:"channels"`
 	Models             []*BackupModel             `json:"models"`
@@ -20,6 +21,14 @@ type BackupData struct {
 	APIKeys            []*BackupAPIKey            `json:"api_keys,omitempty"`
 	UsageRequests      []*BackupUsageRequest      `json:"usage_requests,omitempty"`
 	UsageLogs          []*BackupUsageLog          `json:"usage_logs,omitempty"`
+}
+
+// BackupSystemConfig is a portable system-level configuration entry. Entries
+// tied to a deployment, such as its JWT secret and data storage IDs, are not
+// included in backups.
+type BackupSystemConfig struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
 }
 
 type BackupProject struct {
@@ -68,6 +77,7 @@ func (r BackupUsageRequest) MarshalJSON() ([]byte, error) {
 		ReasoningEffort            string                   `json:"reasoning_effort,omitempty"`
 		Format                     string                   `json:"format,omitempty"`
 		RequestHeaders             objects.JSONRawMessage   `json:"request_headers,omitempty"`
+		ResponseHeaders            objects.JSONRawMessage   `json:"response_headers,omitempty"`
 		RequestBody                objects.JSONRawMessage   `json:"request_body,omitempty"`
 		ResponseBody               objects.JSONRawMessage   `json:"response_body,omitempty"`
 		ResponseChunks             []objects.JSONRawMessage `json:"response_chunks,omitempty"`
@@ -98,6 +108,7 @@ func (r BackupUsageRequest) MarshalJSON() ([]byte, error) {
 		ReasoningEffort:            r.ReasoningEffort,
 		Format:                     r.Format,
 		RequestHeaders:             r.RequestHeaders,
+		ResponseHeaders:            r.ResponseHeaders,
 		RequestBody:                r.RequestBody,
 		ResponseBody:               r.ResponseBody,
 		ResponseChunks:             r.ResponseChunks,
@@ -190,20 +201,22 @@ func (l BackupUsageLog) MarshalJSON() ([]byte, error) {
 }
 
 const (
-	BackupVersion   = "1.3"
+	BackupVersion   = "1.4"
+	BackupVersionV4 = "1.3"
 	BackupVersionV1 = "1.0"
 	BackupVersionV2 = "1.1"
 	BackupVersionV3 = "1.2"
 )
 
 type BackupOptions struct {
-	IncludeProjects    bool
-	IncludeChannels    bool
-	IncludeModels      bool
-	IncludeAPIKeys     bool
-	IncludeModelPrices bool
-	IncludeUsageStats  bool
-	IncludeRequestLogs bool
+	IncludeSystemConfigs bool
+	IncludeProjects      bool
+	IncludeChannels      bool
+	IncludeModels        bool
+	IncludeAPIKeys       bool
+	IncludeModelPrices   bool
+	IncludeUsageStats    bool
+	IncludeRequestLogs   bool
 }
 
 type ConflictStrategy string
@@ -215,6 +228,7 @@ const (
 )
 
 type RestoreOptions struct {
+	IncludeSystemConfigs       bool
 	IncludeProjects            bool
 	IncludeChannels            bool
 	IncludeModels              bool

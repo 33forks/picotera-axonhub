@@ -217,17 +217,21 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("server.port", 8090)
 	v.SetDefault("server.pid_file", "")
 	v.SetDefault("server.public_url", "")
+	v.SetDefault("server.trusted_proxies", []string{})
 	v.SetDefault("server.name", "AxonHub")
 	v.SetDefault("server.base_path", "")
 	v.SetDefault("server.request_timeout", "30s")
 	v.SetDefault("server.llm_request_timeout", "600s")
+	v.SetDefault("server.sse_keep_alive.enabled", false)
+	v.SetDefault("server.sse_keep_alive.interval", "15s")
 	v.SetDefault("server.trace.thread_header", "AH-Thread-Id")
 	v.SetDefault("server.trace.trace_header", "AH-Trace-Id")
 	v.SetDefault("server.trace.extra_trace_headers", []string{})
+	v.SetDefault("server.trace.response_trace_headers", []string{})
 	v.SetDefault("server.trace.extra_trace_body_fields", []string{})
-	v.SetDefault("server.trace.claude_code_trace_enabled", false)
-	v.SetDefault("server.trace.codex_trace_enabled", false)
-	v.SetDefault("server.trace.opencode_trace_enabled", false)
+	v.SetDefault("server.trace.claude_code_trace_enabled", true)
+	v.SetDefault("server.trace.codex_trace_enabled", true)
+	v.SetDefault("server.trace.opencode_trace_enabled", true)
 
 	// Dashboard defaults
 	v.SetDefault("server.dashboard.all_time_token_stats_soft_ttl", "1h")
@@ -235,6 +239,10 @@ func setDefaults(v *viper.Viper) {
 
 	v.SetDefault("server.debug", false)
 	v.SetDefault("server.disable_ssl_verify", false)
+
+	// Max multipart memory for file uploads (backup restore, etc.)
+	// Default: 32M (matching Gin's default). Supports K/M/G suffixes, e.g. "512M", "1G".
+	v.SetDefault("server.max_multipart_memory", "32M")
 
 	// CORS defaults
 	v.SetDefault("server.cors.enabled", false)
@@ -284,6 +292,12 @@ func setDefaults(v *viper.Viper) {
 
 	// Metrics defaults
 	v.SetDefault("metrics.enabled", false)
+	// Register exporter keys so Viper's AutomaticEnv includes their
+	// AXONHUB_METRICS_EXPORTER_* environment variable overrides even when no
+	// config file is present.
+	v.SetDefault("metrics.exporter.type", "")
+	v.SetDefault("metrics.exporter.endpoint", "")
+	v.SetDefault("metrics.exporter.insecure", false)
 
 	// GC defaults
 	v.SetDefault("gc.cron", "0 2 * * *") // Daily at 2:00 AM

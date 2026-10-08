@@ -80,6 +80,10 @@ type AnalyticsDimensionStat struct {
 	OutputTokens      int     `json:"outputTokens"`
 	TotalTokens       int     `json:"totalTokens"`
 	Cost              float64 `json:"cost"`
+	// Output token throughput in tokens per second, null when no valid latency metrics exist
+	TokensPerSecond *float64 `json:"tokensPerSecond,omitempty"`
+	// Average time to first token in milliseconds, null when no streaming request recorded a first token
+	TtftMs *float64 `json:"ttftMs,omitempty"`
 }
 
 // Filter input for analytics queries. All fields are optional and support multi-select.
@@ -159,6 +163,12 @@ type BrandSettings struct {
 
 type BulkImportChannelsInput struct {
 	Channels []*biz.BulkImportChannelItem `json:"channels"`
+}
+
+type BulkUpdateChannelAutoDisablePayload struct {
+	Success  bool           `json:"success"`
+	Updated  int            `json:"updated"`
+	Channels []*ent.Channel `json:"channels"`
 }
 
 type BulkUpdateChannelOrderingInput struct {
@@ -392,6 +402,18 @@ type PromptProtectionRulePreviewResult struct {
 	HasMatch bool   `json:"hasMatch"`
 }
 
+type ProviderQuotaCollectionProviderInput struct {
+	Provider string `json:"provider"`
+	Enabled  bool   `json:"enabled"`
+}
+
+type ProvidersCatalog struct {
+	Data      objects.JSONRawMessage `json:"data"`
+	FetchedAt *time.Time             `json:"fetchedAt,omitempty"`
+	Source    string                 `json:"source"`
+	Filtered  bool                   `json:"filtered"`
+}
+
 type QueryModelsInput struct {
 	StatusIn                []channel.Status `json:"statusIn,omitempty"`
 	IncludeMapping          *bool            `json:"includeMapping,omitempty"`
@@ -451,6 +473,7 @@ type SignInPayload struct {
 type SyncChannelModelsPayload struct {
 	ChannelID       objects.GUID `json:"channelID"`
 	SupportedModels []string     `json:"supportedModels"`
+	ManualModels    []string     `json:"manualModels"`
 }
 
 type SystemModelSettingOnboarding struct {
@@ -555,22 +578,28 @@ type UpdateAPIKeyScopesInput struct {
 }
 
 type UpdateAutoBackupSettingsInput struct {
-	Enabled            *bool                `json:"enabled,omitempty"`
-	Frequency          *biz.BackupFrequency `json:"frequency,omitempty"`
-	DataStorageID      *int                 `json:"dataStorageID,omitempty"`
-	IncludeChannels    *bool                `json:"includeChannels,omitempty"`
-	IncludeModels      *bool                `json:"includeModels,omitempty"`
-	IncludeAPIKeys     *bool                `json:"includeAPIKeys,omitempty"`
-	IncludeModelPrices *bool                `json:"includeModelPrices,omitempty"`
-	IncludeUsageStats  *bool                `json:"includeUsageStats,omitempty"`
-	IncludeRequestLogs *bool                `json:"includeRequestLogs,omitempty"`
-	RetentionDays      *int                 `json:"retentionDays,omitempty"`
+	IncludeSystemConfigs *bool                `json:"includeSystemConfigs,omitempty"`
+	Enabled              *bool                `json:"enabled,omitempty"`
+	Frequency            *biz.BackupFrequency `json:"frequency,omitempty"`
+	DataStorageID        *int                 `json:"dataStorageID,omitempty"`
+	IncludeChannels      *bool                `json:"includeChannels,omitempty"`
+	IncludeModels        *bool                `json:"includeModels,omitempty"`
+	IncludeAPIKeys       *bool                `json:"includeAPIKeys,omitempty"`
+	IncludeModelPrices   *bool                `json:"includeModelPrices,omitempty"`
+	IncludeUsageStats    *bool                `json:"includeUsageStats,omitempty"`
+	IncludeRequestLogs   *bool                `json:"includeRequestLogs,omitempty"`
+	RetentionDays        *int                 `json:"retentionDays,omitempty"`
 }
 
 type UpdateBrandSettingsInput struct {
 	BrandName *string `json:"brandName,omitempty"`
 	BrandLogo *string `json:"brandLogo,omitempty"`
 	Title     *string `json:"title,omitempty"`
+}
+
+type UpdateCatalogSettingsInput struct {
+	UpstreamURL    *string `json:"upstreamURL,omitempty"`
+	RefreshSeconds *int    `json:"refreshSeconds,omitempty"`
 }
 
 type UpdateDefaultDataStorageInput struct {
@@ -602,9 +631,13 @@ type UpdateProjectUserInput struct {
 	RemoveRoleIDs []*objects.GUID `json:"removeRoleIDs,omitempty"`
 }
 
-type UpdateQuotaEnforcementSettingsInput struct {
-	Enabled *bool                     `json:"enabled,omitempty"`
-	Mode    *biz.QuotaEnforcementMode `json:"mode,omitempty"`
+type UpdateProviderQuotaCollectionSettingsInput struct {
+	Enabled   *bool                                   `json:"enabled,omitempty"`
+	Providers []*ProviderQuotaCollectionProviderInput `json:"providers,omitempty"`
+}
+
+type UpdateQuotaRoutingSettingsInput struct {
+	DefaultMode *objects.QuotaRoutingMode `json:"defaultMode,omitempty"`
 }
 
 type UpdateSecuritySettingsInput struct {
@@ -612,7 +645,15 @@ type UpdateSecuritySettingsInput struct {
 	ShowRequestLogIPBanIcon *bool    `json:"showRequestLogIPBanIcon,omitempty"`
 }
 
+type UpdateUsageCostInjectionSettingsInput struct {
+	Enabled bool `json:"enabled"`
+}
+
 type UpdateUserAgentPassThroughSettingsInput struct {
+	Enabled bool `json:"enabled"`
+}
+
+type UsageCostInjectionSettings struct {
 	Enabled bool `json:"enabled"`
 }
 

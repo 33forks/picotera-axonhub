@@ -126,25 +126,19 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 		} else if len(msg.Content.MultipleContent) > 0 {
 			contentParts := make([]llm.MessageContentPart, 0, len(msg.Content.MultipleContent))
 
-			var (
-				reasoningContent         string
-				hasReasoningInContent    bool
-				redactedReasoningContent string
-			)
+			var redactedReasoningContent string
 
-			var reasoningSignature string
+			var reasoningItems []llm.ReasoningItem
 
 			for blockIdx, block := range msg.Content.MultipleContent {
 				switch block.Type {
 				case "thinking":
-					// Keep thinking content in MultipleContent to preserve order
-					if block.Thinking != nil && *block.Thinking != "" {
-						reasoningContent = *block.Thinking
-						hasReasoningInContent = true
+					item := llm.ReasoningItem{
+						Content:   lo.FromPtr(block.Thinking),
+						Signature: lo.FromPtr(block.Signature),
 					}
-
-					if block.Signature != nil && *block.Signature != "" {
-						reasoningSignature = *block.Signature
+					if item.Content != "" || item.Signature != "" {
+						reasoningItems = append(reasoningItems, item)
 					}
 				case "redacted_thinking":
 					// Handle redacted thinking content - store the encrypted data
@@ -271,14 +265,23 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 				hasContent = true
 			}
 
-			// Assign reasoning content and signature if present
-			if reasoningContent != "" && hasReasoningInContent {
-				chatMsg.ReasoningContent = &reasoningContent
-				hasContent = true
-			}
+			if len(reasoningItems) > 0 {
+				chatMsg.ReasoningItems = reasoningItems
 
-			if reasoningSignature != "" {
-				chatMsg.ReasoningSignature = &reasoningSignature
+				// Keep a scalar fallback for non-Responses upstream converters, which
+				// do not consume ReasoningItems. The signature remains the last block's
+				// opaque value, matching the legacy representation.
+				var aggregateReasoning string
+				for _, item := range reasoningItems {
+					aggregateReasoning += item.Content
+				}
+				if aggregateReasoning != "" {
+					chatMsg.ReasoningContent = lo.ToPtr(aggregateReasoning)
+				}
+				if signature := reasoningItems[len(reasoningItems)-1].Signature; signature != "" {
+					chatMsg.ReasoningSignature = lo.ToPtr(signature)
+				}
+				hasContent = true
 			}
 
 			if redactedReasoningContent != "" {
@@ -330,14 +333,28 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 	// Convert tool_choice
 	if anthropicReq.ToolChoice != nil {
 		chatReq.ToolChoice = convertAnthropicToolChoiceToLLM(anthropicReq.ToolChoice)
+
+		if disable := anthropicReq.ToolChoice.DisableParallelToolUse; disable != nil {
+			chatReq.ParallelToolCalls = lo.ToPtr(!*disable)
+		}
 	}
 
 	// Convert thinking configuration to reasoning effort and preserve budget
 	if anthropicReq.Thinking != nil {
 		switch anthropicReq.Thinking.Type {
 		case "enabled":
-			chatReq.ReasoningEffort = thinkingBudgetToReasoningEffort(anthropicReq.Thinking.BudgetTokens)
-			chatReq.ReasoningBudget = lo.ToPtr(anthropicReq.Thinking.BudgetTokens)
+			// budget_tokens is the client's native expression here: mark it so the
+			// outbound transformer round-trips the budget verbatim instead of
+			// re-deriving a thinking config from the derived effort level.
+			chatReq.TransformerMetadata[TransformerMetadataKeyThinkingType] = "enabled"
+			if budget := anthropicReq.Thinking.BudgetTokens; budget > 0 {
+				chatReq.ReasoningEffort = thinkingBudgetToReasoningEffort(budget)
+				chatReq.ReasoningBudget = lo.ToPtr(budget)
+			} else {
+				// No budget given: fall back to the medium level so the outbound side uses
+				// the channel's budget mapping instead of sending budget_tokens=0.
+				chatReq.ReasoningEffort = llm.ReasoningEffortMedium
+			}
 
 			if anthropicReq.Thinking.Display != "" {
 				chatReq.TransformerMetadata[TransformerMetadataKeyThinkingDisplay] = anthropicReq.Thinking.Display
@@ -362,14 +379,10 @@ func convertToLLMRequest(anthropicReq *MessageRequest) (*llm.Request, error) {
 	// Convert output_config
 	if anthropicReq.OutputConfig != nil && anthropicReq.OutputConfig.Effort != "" {
 		chatReq.TransformerMetadata[TransformerMetadataKeyOutputConfigEffort] = anthropicReq.OutputConfig.Effort
-		// Map output_config effort to reasoning_effort so other outbound transformers can use it.
-		// Anthropic "max" has no direct equivalent in other providers; map to "xhigh"
-		// so downstream transformers can handle it explicitly.
-		if anthropicReq.OutputConfig.Effort == "max" {
-			chatReq.ReasoningEffort = "xhigh"
-		} else {
-			chatReq.ReasoningEffort = anthropicReq.OutputConfig.Effort
-		}
+		// The client sent an explicit effort level: pass it through verbatim (including
+		// "max") so converted protocols see the exact requested level. The original
+		// value is preserved in TransformerMetadata for native round-trips.
+		chatReq.ReasoningEffort = anthropicReq.OutputConfig.Effort
 	}
 
 	return chatReq, nil
@@ -740,6 +753,7 @@ func convertToolToLLM(tool Tool) (llm.Tool, bool) {
 				Name:        tool.Name,
 				Description: tool.Description,
 				Parameters:  tool.InputSchema,
+				Strict:      tool.Strict,
 			},
 			CacheControl: convertToLLMCacheControl(tool.CacheControl),
 		}, true

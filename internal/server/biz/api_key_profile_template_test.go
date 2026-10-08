@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/looplj/axonhub/internal/authz"
+	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/apikey"
 	"github.com/looplj/axonhub/internal/ent/apikeyprofiletemplate"
@@ -16,6 +17,7 @@ import (
 	"github.com/looplj/axonhub/internal/ent/project"
 	"github.com/looplj/axonhub/internal/ent/user"
 	"github.com/looplj/axonhub/internal/objects"
+	"github.com/looplj/axonhub/internal/scopes"
 )
 
 func setupTestTemplateService(t *testing.T) (*APIKeyProfileTemplateService, *ent.Client) {
@@ -228,8 +230,135 @@ func TestLoadTemplate_HappyPath(t *testing.T) {
 
 	// Verify loaded profile is appended
 	require.Equal(t, "Production", updatedKey.Profiles.Profiles[1].Name)
+	require.NotNil(t, updatedKey.Profiles.Profiles[1].TemplateID)
+	require.Equal(t, template.ID, *updatedKey.Profiles.Profiles[1].TemplateID)
+	require.Equal(t, template.Name, updatedKey.Profiles.Profiles[1].TemplateName)
 	require.Len(t, updatedKey.Profiles.Profiles[1].ModelMappings, 1)
 	require.Equal(t, "claude-3", updatedKey.Profiles.Profiles[1].ModelMappings[0].From)
+}
+
+func TestUpdateTemplatePublishesToLinkedAndUnchangedLegacyProfiles(t *testing.T) {
+	svc, client := setupTestTemplateService(t)
+	defer client.Close()
+
+	ctx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
+	projectEntity, err := client.Project.Create().
+		SetName(fmt.Sprintf("publish-project-%d", time.Now().UnixNano())).
+		SetDescription("publish test").
+		SetStatus(project.StatusActive).
+		Save(ctx)
+	require.NoError(t, err)
+
+	template, err := client.APIKeyProfileTemplate.Create().
+		SetName("Production").
+		SetProject(projectEntity).
+		SetProfile(&objects.APIKeyProfile{
+			Name:          "Production",
+			ModelMappings: []objects.ModelMapping{{From: "claude", To: "old-model"}},
+		}).
+		Save(ctx)
+	require.NoError(t, err)
+
+	templateID := template.ID
+	createKey := func(name string, profile objects.APIKeyProfile) *ent.APIKey {
+		key, createErr := client.APIKey.Create().
+			SetName(name).
+			SetKey(fmt.Sprintf("ah-%s-%d", name, time.Now().UnixNano())).
+			SetProjectID(projectEntity.ID).
+			SetType(apikey.TypeUser).
+			SetProfiles(&objects.APIKeyProfiles{ActiveProfile: profile.Name, Profiles: []objects.APIKeyProfile{profile}}).
+			Save(ctx)
+		require.NoError(t, createErr)
+		return key
+	}
+
+	linkedKey := createKey("linked", objects.APIKeyProfile{
+		Name:          "Local alias",
+		TemplateID:    &templateID,
+		TemplateName:  template.Name,
+		ModelMappings: []objects.ModelMapping{{From: "claude", To: "old-model"}},
+	})
+	legacyKey := createKey("legacy", objects.APIKeyProfile{
+		Name:          "Production",
+		ModelMappings: []objects.ModelMapping{{From: "claude", To: "old-model"}},
+	})
+	detachedKey := createKey("detached", objects.APIKeyProfile{
+		Name:          "Production",
+		ModelMappings: []objects.ModelMapping{{From: "claude", To: "custom-model"}},
+	})
+
+	count, err := svc.CountLinkedProfiles(ctx, template)
+	require.NoError(t, err)
+	require.Equal(t, 2, count)
+
+	_, err = svc.UpdateTemplate(ctx, template.ID, ent.UpdateAPIKeyProfileTemplateInput{}, &objects.APIKeyProfile{
+		Name:          "Production",
+		ModelMappings: []objects.ModelMapping{{From: "claude", To: "new-model"}},
+	})
+	require.NoError(t, err)
+
+	for _, key := range []*ent.APIKey{linkedKey, legacyKey} {
+		updated, getErr := client.APIKey.Get(ctx, key.ID)
+		require.NoError(t, getErr)
+		require.Equal(t, "new-model", updated.Profiles.Profiles[0].ModelMappings[0].To)
+		require.NotNil(t, updated.Profiles.Profiles[0].TemplateID)
+		require.Equal(t, template.ID, *updated.Profiles.Profiles[0].TemplateID)
+	}
+
+	updatedLinked, err := client.APIKey.Get(ctx, linkedKey.ID)
+	require.NoError(t, err)
+	require.Equal(t, "Local alias", updatedLinked.Profiles.Profiles[0].Name)
+
+	updatedDetached, err := client.APIKey.Get(ctx, detachedKey.ID)
+	require.NoError(t, err)
+	require.Equal(t, "custom-model", updatedDetached.Profiles.Profiles[0].ModelMappings[0].To)
+	require.Nil(t, updatedDetached.Profiles.Profiles[0].TemplateID)
+
+	_, err = svc.DeleteTemplate(ctx, template.ID)
+	require.NoError(t, err)
+	for _, key := range []*ent.APIKey{linkedKey, legacyKey} {
+		updated, getErr := client.APIKey.Get(ctx, key.ID)
+		require.NoError(t, getErr)
+		require.Nil(t, updated.Profiles.Profiles[0].TemplateID)
+		require.Empty(t, updated.Profiles.Profiles[0].TemplateName)
+		require.Equal(t, "new-model", updated.Profiles.Profiles[0].ModelMappings[0].To)
+	}
+}
+
+func TestDetachModifiedTemplateProfiles(t *testing.T) {
+	templateID := 7
+	existing := &objects.APIKeyProfiles{Profiles: []objects.APIKeyProfile{
+		{
+			Name:          "linked",
+			TemplateID:    &templateID,
+			TemplateName:  "Production",
+			ModelMappings: []objects.ModelMapping{{From: "claude", To: "old-model"}},
+		},
+	}}
+
+	unchanged := &objects.APIKeyProfiles{Profiles: []objects.APIKeyProfile{
+		{
+			Name:          "linked",
+			TemplateID:    &templateID,
+			TemplateName:  "tampered name",
+			ModelMappings: []objects.ModelMapping{{From: "claude", To: "old-model"}},
+		},
+	}}
+	detachModifiedTemplateProfiles(existing, unchanged)
+	require.NotNil(t, unchanged.Profiles[0].TemplateID)
+	require.Equal(t, "Production", unchanged.Profiles[0].TemplateName)
+
+	modified := &objects.APIKeyProfiles{Profiles: []objects.APIKeyProfile{
+		{
+			Name:          "linked",
+			TemplateID:    &templateID,
+			TemplateName:  "Production",
+			ModelMappings: []objects.ModelMapping{{From: "claude", To: "custom-model"}},
+		},
+	}}
+	detachModifiedTemplateProfiles(existing, modified)
+	require.Nil(t, modified.Profiles[0].TemplateID)
+	require.Empty(t, modified.Profiles[0].TemplateName)
 }
 
 // TestLoadTemplate_NameConflict tests loading a template where profile name already exists.
@@ -558,4 +687,91 @@ func TestLoadTemplate_DifferentProject(t *testing.T) {
 	// Try to load template from project 2 into API key in project 1
 	_, err = svc.LoadTemplate(ctx, template.ID, apiKey.ID)
 	require.Error(t, err)
+}
+
+// TestLoadTemplate_PersonalKeyGuard runs LoadTemplate under the real privacy
+// policy. A project owner can read another member's personal key but must not
+// load a template into it; the creator and a system owner can.
+func TestLoadTemplate_PersonalKeyGuard(t *testing.T) {
+	svc, client := setupTestTemplateService(t)
+	defer client.Close()
+
+	setupCtx := authz.WithTestBypass(ent.NewContext(context.Background(), client))
+
+	testProject, err := client.Project.Create().
+		SetName(fmt.Sprintf("test-project-%d", time.Now().UnixNano())).
+		SetDescription("test").
+		SetStatus(project.StatusActive).
+		Save(setupCtx)
+	require.NoError(t, err)
+
+	newUser := func(name string, isSystemOwner bool, membership *ent.UserProjectCreate) *ent.User {
+		u, err := client.User.Create().
+			SetEmail(fmt.Sprintf("%s-%d@example.com", name, time.Now().UnixNano())).
+			SetPassword("password").
+			SetIsOwner(isSystemOwner).
+			SetStatus(user.StatusActivated).
+			Save(setupCtx)
+		require.NoError(t, err)
+
+		if membership != nil {
+			_, err = membership.SetUserID(u.ID).SetProjectID(testProject.ID).Save(setupCtx)
+			require.NoError(t, err)
+		}
+
+		u, err = client.User.Query().Where(user.IDEQ(u.ID)).WithProjectUsers().Only(setupCtx)
+		require.NoError(t, err)
+
+		return u
+	}
+
+	creator := newUser("creator", false, client.UserProject.Create().
+		SetScopes([]string{string(scopes.ScopeReadAPIKeys), string(scopes.ScopeWriteAPIKeys)}))
+	projectOwner := newUser("project-owner", false, client.UserProject.Create().SetIsOwner(true))
+	systemOwner := newUser("system-owner", true, nil)
+
+	apiKey, err := client.APIKey.Create().
+		SetName("personal-api-key").
+		SetKey(fmt.Sprintf("ah-test-%d", time.Now().UnixNano())).
+		SetUserID(creator.ID).
+		SetProjectID(testProject.ID).
+		SetType(apikey.TypePersonal).
+		Save(setupCtx)
+	require.NoError(t, err)
+
+	template, err := client.APIKeyProfileTemplate.Create().
+		SetName("prod-template").
+		SetDescription("Production template").
+		SetProject(testProject).
+		SetProfile(&objects.APIKeyProfile{Name: "Production"}).
+		Save(setupCtx)
+	require.NoError(t, err)
+
+	userCtx := func(u *ent.User) context.Context {
+		ctx := contexts.WithProjectID(ent.NewContext(context.Background(), client), testProject.ID)
+		return contexts.WithUser(ctx, u)
+	}
+
+	// The project owner can read the personal key through privacy...
+	projectOwnerCtx := userCtx(projectOwner)
+	visible, err := client.APIKey.Get(projectOwnerCtx, apiKey.ID)
+	require.NoError(t, err)
+	require.Equal(t, apiKey.ID, visible.ID)
+
+	// ...but cannot load a template into it.
+	_, err = svc.LoadTemplate(projectOwnerCtx, template.ID, apiKey.ID)
+	require.ErrorContains(t, err, "personal API key can only be modified by its creator or a system owner")
+	unchanged, err := client.APIKey.Get(setupCtx, apiKey.ID)
+	require.NoError(t, err)
+	require.True(t, unchanged.Profiles == nil || len(unchanged.Profiles.Profiles) == 0)
+
+	// The creator can.
+	updatedKey, err := svc.LoadTemplate(userCtx(creator), template.ID, apiKey.ID)
+	require.NoError(t, err)
+	require.Len(t, updatedKey.Profiles.Profiles, 1)
+
+	// A system owner can too.
+	updatedKey, err = svc.LoadTemplate(userCtx(systemOwner), template.ID, apiKey.ID)
+	require.NoError(t, err)
+	require.Len(t, updatedKey.Profiles.Profiles, 2)
 }

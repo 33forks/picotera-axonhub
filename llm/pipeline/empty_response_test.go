@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -27,6 +28,24 @@ func TestHasResponseContent_ReasoningSignature(t *testing.T) {
 func TestHasResponseContent(t *testing.T) {
 	t.Run("empty response", func(t *testing.T) {
 		require.False(t, hasResponseContent(&llm.Response{}))
+	})
+
+	t.Run("decisions answers", func(t *testing.T) {
+		require.True(t, hasResponseContent(&llm.Response{
+			Decisions: &llm.DecisionsResponse{Answers: []json.RawMessage{json.RawMessage(`{"type":"refusal"}`)}},
+		}))
+		require.False(t, hasResponseContent(&llm.Response{
+			Decisions: &llm.DecisionsResponse{Answers: []json.RawMessage{}},
+		}))
+	})
+
+	t.Run("alpha search response", func(t *testing.T) {
+		require.True(t, hasResponseContent(&llm.Response{
+			AlphaSearch: &llm.AlphaSearchResponse{Body: []byte(`{"ok":true}`)},
+		}))
+		require.False(t, hasResponseContent(&llm.Response{
+			AlphaSearch: &llm.AlphaSearchResponse{Body: nil},
+		}))
 	})
 
 	t.Run("message text content", func(t *testing.T) {
@@ -101,6 +120,28 @@ func TestHasResponseContent(t *testing.T) {
 					Index: 0,
 				}},
 			},
+		}))
+	})
+
+	t.Run("moderation response with results", func(t *testing.T) {
+		require.True(t, hasResponseContent(&llm.Response{
+			Moderation: &llm.ModerationResponse{
+				Results: []llm.ModerationClassification{{
+					Flagged: false,
+					Categories: map[string]bool{
+						"hate": false,
+					},
+					CategoryScores: map[string]float64{
+						"hate": 0.01,
+					},
+				}},
+			},
+		}))
+	})
+
+	t.Run("empty moderation response", func(t *testing.T) {
+		require.False(t, hasResponseContent(&llm.Response{
+			Moderation: &llm.ModerationResponse{},
 		}))
 	})
 }
@@ -445,6 +486,48 @@ func TestPipeline_Process_NonStreamEmptyResponseDetection(t *testing.T) {
 								Embedding: []float64{0.1, 0.2, 0.3},
 							},
 							Index: 0,
+						}},
+					},
+				}, nil
+			},
+		}
+
+		p := &pipeline{
+			Executor:               executor,
+			Inbound:                &mockInbound{},
+			Outbound:               outbound,
+			emptyResponseDetection: true,
+		}
+
+		res, err := p.Process(context.Background(), &httpclient.Request{})
+		require.NoError(t, err)
+		require.NotNil(t, res)
+		require.Equal(t, 1, execCalls)
+	})
+
+	t.Run("accepts non-stream moderation response", func(t *testing.T) {
+		execCalls := 0
+		executor := &mockExecutor{
+			do: func(ctx context.Context, req *httpclient.Request) (*httpclient.Response, error) {
+				execCalls++
+				return &httpclient.Response{}, nil
+			},
+		}
+
+		outbound := &mockOutbound{
+			transformResponse: func(ctx context.Context, resp *httpclient.Response) (*llm.Response, error) {
+				return &llm.Response{
+					RequestType: llm.RequestTypeModeration,
+					APIFormat:   llm.APIFormatOpenAIModeration,
+					Moderation: &llm.ModerationResponse{
+						Results: []llm.ModerationClassification{{
+							Flagged: false,
+							Categories: map[string]bool{
+								"hate": false,
+							},
+							CategoryScores: map[string]float64{
+								"hate": 0.01,
+							},
 						}},
 					},
 				}, nil

@@ -13,6 +13,12 @@ var ErrEmptyResponse = errors.New("empty response detected")
 // ErrStreamFirstEventTimeout indicates a streaming response did not produce the first event in time.
 var ErrStreamFirstEventTimeout = errors.New("stream first event timeout")
 
+// ErrPreCommitBufferExceeded indicates that a retryable stream produced too
+// many or too many bytes of non-meaningful events before reaching a safe
+// commitment boundary.
+// The attempt is failed without exposing its buffered events to the caller.
+var ErrPreCommitBufferExceeded = errors.New("pre-commit stream buffer limit exceeded")
+
 // ErrNonStreamResponseTimeout indicates a non-streaming response did not complete in time.
 var ErrNonStreamResponseTimeout = errors.New("non-stream response timeout")
 
@@ -55,10 +61,6 @@ func hasMessageContent(msg *llm.Message) bool {
 		return true
 	}
 
-	if msg.Audio != nil {
-		return true
-	}
-
 	return false
 }
 
@@ -66,6 +68,10 @@ func hasMessageContent(msg *llm.Message) bool {
 func hasResponseContent(resp *llm.Response) bool {
 	if resp == nil || resp == llm.DoneResponse || resp.Object == "[DONE]" {
 		return false
+	}
+
+	if resp.Moderation != nil && len(resp.Moderation.Results) > 0 {
+		return true
 	}
 
 	if resp.Embedding != nil && len(resp.Embedding.Data) > 0 {
@@ -109,6 +115,18 @@ func hasResponseContent(resp *llm.Response) bool {
 	}
 
 	if resp.TranscriptionStreamEvent != nil && (resp.TranscriptionStreamEvent.Delta != "" || resp.TranscriptionStreamEvent.Text != "" || resp.TranscriptionStreamEvent.Type != "") {
+		return true
+	}
+
+	if resp.AlphaSearch != nil && len(resp.AlphaSearch.Body) > 0 {
+		return true
+	}
+
+	if resp.SystemOne != nil && len(resp.SystemOne.Answers) > 0 {
+		return true
+	}
+
+	if resp.Decisions != nil && len(resp.Decisions.Answers) > 0 {
 		return true
 	}
 

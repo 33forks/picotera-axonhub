@@ -35,6 +35,7 @@ export type ModelLimit = z.infer<typeof modelLimitSchema>;
 
 export const modelCardSchema = z.object({
   reasoning: modelReasoningSchema.optional(),
+  reasoningEfforts: z.array(z.string()).optional().nullable(),
   toolCall: z.boolean().optional(),
   temperature: z.boolean().optional(),
   modalities: modelModalitiesSchema.optional(),
@@ -128,9 +129,19 @@ export const modelAssociationSchema = z.object({
 });
 export type ModelAssociation = z.infer<typeof modelAssociationSchema>;
 
+export function normalizeModelRoutingPolicyValue(value?: string | null): string {
+  if (!value || value === 'system_default') {
+    return 'default';
+  }
+
+  return value;
+}
+
 export const modelSettingsSchema = z.object({
   disableDeveloperSettingsInheritance: z.boolean().optional().default(false),
   associations: z.array(modelAssociationSchema).optional().default([]),
+  loadBalancerStrategy: z.enum(['default', 'adaptive', 'failover', 'circuit-breaker', 'round-robin']).optional().default('default'),
+  traceStickyMode: z.enum(['default', 'disabled', 'prefer_previous_channel']).optional().default('default'),
 });
 export type ModelSettings = z.infer<typeof modelSettingsSchema>;
 

@@ -23,10 +23,11 @@ import (
 
 // CreateAPIKeyInput represents a mutation input for creating apikeys.
 type CreateAPIKeyInput struct {
-	Name      string
-	Type      *apikey.Type
-	Scopes    []string
-	ProjectID int
+	Name       string
+	Type       *apikey.Type
+	Scopes     []string
+	AllowedIps []string
+	ProjectID  int
 }
 
 // Mutate applies the CreateAPIKeyInput on the APIKeyMutation builder.
@@ -37,6 +38,9 @@ func (i *CreateAPIKeyInput) Mutate(m *APIKeyMutation) {
 	}
 	if v := i.Scopes; v != nil {
 		m.SetScopes(v)
+	}
+	if v := i.AllowedIps; v != nil {
+		m.SetAllowedIps(v)
 	}
 	m.SetProjectID(i.ProjectID)
 }
@@ -49,10 +53,13 @@ func (c *APIKeyCreate) SetInput(i CreateAPIKeyInput) *APIKeyCreate {
 
 // UpdateAPIKeyInput represents a mutation input for updating apikeys.
 type UpdateAPIKeyInput struct {
-	Name         *string
-	ClearScopes  bool
-	Scopes       []string
-	AppendScopes []string
+	Name             *string
+	ClearScopes      bool
+	Scopes           []string
+	AppendScopes     []string
+	ClearAllowedIps  bool
+	AllowedIps       []string
+	AppendAllowedIps []string
 }
 
 // Mutate applies the UpdateAPIKeyInput on the APIKeyMutation builder.
@@ -68,6 +75,15 @@ func (i *UpdateAPIKeyInput) Mutate(m *APIKeyMutation) {
 	}
 	if i.AppendScopes != nil {
 		m.AppendScopes(i.Scopes)
+	}
+	if i.ClearAllowedIps {
+		m.ClearAllowedIps()
+	}
+	if v := i.AllowedIps; v != nil {
+		m.SetAllowedIps(v)
+	}
+	if i.AppendAllowedIps != nil {
+		m.AppendAllowedIps(i.AllowedIps)
 	}
 }
 
@@ -901,12 +917,14 @@ type CreateRequestInput struct {
 	Format                     *string
 	RequestHeaders             objects.JSONRawMessage
 	RequestBody                objects.JSONRawMessage
+	ResponseHeaders            objects.JSONRawMessage
 	ResponseBody               objects.JSONRawMessage
 	ResponseChunks             []objects.JSONRawMessage
 	ExternalID                 *string
 	Status                     request.Status
 	Stream                     *bool
 	ClientIP                   *string
+	UserAgent                  *string
 	MetricsLatencyMs           *int64
 	MetricsFirstTokenLatencyMs *int64
 	MetricsReasoningDurationMs *int64
@@ -939,6 +957,9 @@ func (i *CreateRequestInput) Mutate(m *RequestMutation) {
 	if v := i.RequestBody; v != nil {
 		m.SetRequestBody(v)
 	}
+	if v := i.ResponseHeaders; v != nil {
+		m.SetResponseHeaders(v)
+	}
 	if v := i.ResponseBody; v != nil {
 		m.SetResponseBody(v)
 	}
@@ -954,6 +975,9 @@ func (i *CreateRequestInput) Mutate(m *RequestMutation) {
 	}
 	if v := i.ClientIP; v != nil {
 		m.SetClientIP(*v)
+	}
+	if v := i.UserAgent; v != nil {
+		m.SetUserAgent(*v)
 	}
 	if v := i.MetricsLatencyMs; v != nil {
 		m.SetMetricsLatencyMs(*v)
@@ -1002,6 +1026,9 @@ type UpdateRequestInput struct {
 	ClearRequestHeaders             bool
 	RequestHeaders                  objects.JSONRawMessage
 	AppendRequestHeaders            objects.JSONRawMessage
+	ClearResponseHeaders            bool
+	ResponseHeaders                 objects.JSONRawMessage
+	AppendResponseHeaders           objects.JSONRawMessage
 	ClearResponseBody               bool
 	ResponseBody                    objects.JSONRawMessage
 	AppendResponseBody              objects.JSONRawMessage
@@ -1038,6 +1065,15 @@ func (i *UpdateRequestInput) Mutate(m *RequestMutation) {
 	}
 	if i.AppendRequestHeaders != nil {
 		m.AppendRequestHeaders(i.RequestHeaders)
+	}
+	if i.ClearResponseHeaders {
+		m.ClearResponseHeaders()
+	}
+	if v := i.ResponseHeaders; v != nil {
+		m.SetResponseHeaders(v)
+	}
+	if i.AppendResponseHeaders != nil {
+		m.AppendResponseHeaders(i.ResponseHeaders)
 	}
 	if i.ClearResponseBody {
 		m.ClearResponseBody()

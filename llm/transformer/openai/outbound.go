@@ -65,14 +65,6 @@ type Config struct {
 	// Use ReasoningFieldContent (default) for DeepSeek/Mimo/Gemini, ReasoningFieldReasoning for NanoGPT/OpenRouter,
 	// or ReasoningFieldNone to strip all reasoning fields.
 	ReasoningField ReasoningField `json:"reasoning_field,omitempty"`
-
-	// ReasoningEffortMapping maps inbound reasoning_effort values to outbound ones for
-	// non-standard OpenAI-compatible providers. The first entry whose From matches the
-	// effort value wins; values not in the list pass through unchanged.
-	// e.g. [{"from":"xhigh","to":"max"}] converts Anthropic's internal "xhigh" (mapped
-	// from "max") back to "max" for providers that only recognize "max". Consumed in
-	// TransformRequest.
-	ReasoningEffortMapping []llm.ReasoningEffortMapping `json:"reasoning_effort_mapping,omitempty"`
 }
 
 // OutboundTransformer implements transformer.Outbound for OpenAI format.
@@ -161,6 +153,10 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	switch llmReq.RequestType {
 	case llm.RequestTypeEmbedding:
 		return t.transformEmbeddingRequest(ctx, llmReq)
+	case llm.RequestTypeModeration:
+		return t.transformModerationRequest(ctx, llmReq)
+	case llm.RequestTypeAlphaSearch:
+		return t.transformAlphaSearchRequest(ctx, llmReq)
 	case llm.RequestTypeImage:
 		return t.buildImageGenerationAPIRequest(ctx, llmReq)
 	case llm.RequestTypeVideo:
@@ -180,6 +176,9 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	if len(llmReq.Messages) == 0 {
 		return nil, fmt.Errorf("%w: messages are required", transformer.ErrInvalidRequest)
 	}
+	if err := validateChatDocumentParts(llmReq.Messages); err != nil {
+		return nil, err
+	}
 
 	// Determine which reasoning field to use, default to ReasoningFieldContent.
 	// reasoning_content is the standard field used by most providers (OpenAI o-series,
@@ -194,11 +193,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 	}
 
 	// Convert to OpenAI Request format (this strips helper fields)
-	oaiReq := RequestFromLLM(llmReq, reasoningField)
-	// Apply per-channel reasoning_effort mapping for non-standard OpenAI-compatible providers.
-	// Entries in the map replace the effort value; values not in the map pass through unchanged.
-	// e.g. ollama channel with {"xhigh": "max"} converts Anthropic's internal "xhigh" back to "max".
-	oaiReq.ReasoningEffort = applyReasoningEffortMapping(oaiReq.ReasoningEffort, t.config.ReasoningEffortMapping)
+	oaiReq := RequestFromLLM(ctx, llmReq, reasoningField)
 	//nolint:exhaustive // Checked.
 	switch t.config.PlatformType {
 	case PlatformOpenAI:
@@ -249,6 +244,12 @@ func (t *OutboundTransformer) TransformResponse(
 		return nil, fmt.Errorf("http response is nil")
 	}
 
+	// Alpha Search owns its error conversion because the upstream response body
+	// can contain provider-specific details that the generic status check drops.
+	if httpResp.Request != nil && httpResp.Request.APIFormat == string(llm.APIFormatOpenAIAlphaSearch) {
+		return t.transformAlphaSearchResponse(ctx, httpResp)
+	}
+
 	// Check for HTTP error status codes
 	if httpResp.StatusCode >= 400 {
 		return nil, fmt.Errorf("HTTP error %d", httpResp.StatusCode)
@@ -268,6 +269,8 @@ func (t *OutboundTransformer) TransformResponse(
 			return transformImageGenerationResponse(httpResp)
 		case string(llm.APIFormatOpenAIEmbedding):
 			return t.transformEmbeddingResponse(ctx, httpResp)
+		case string(llm.APIFormatOpenAIModeration):
+			return t.transformModerationResponse(ctx, httpResp)
 		case string(llm.APIFormatOpenAIVideo):
 			return transformVideoResponse(httpResp)
 		case string(llm.APIFormatOpenAISpeech):
@@ -338,6 +341,17 @@ func (t *OutboundTransformer) TransformStreamChunk(
 	resp, err := t.TransformResponse(ctx, httpResp)
 	if err != nil {
 		return nil, err
+	}
+
+	// Normalize empty finish_reason to nil. Some OpenAI-compatible providers
+	// (e.g. Sensenova) emit finish_reason:"" in every stream chunk. An empty
+	// string is semantically identical to "not finished" (null), so this
+	// normalization prevents downstream code from mistaking every chunk for
+	// a terminal event.
+	for i := range resp.Choices {
+		if resp.Choices[i].FinishReason != nil && *resp.Choices[i].FinishReason == "" {
+			resp.Choices[i].FinishReason = nil
+		}
 	}
 
 	// Skip non-standard events with explicit empty choices array and no usage

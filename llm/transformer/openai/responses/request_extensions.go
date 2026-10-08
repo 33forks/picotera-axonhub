@@ -1,10 +1,27 @@
 package responses
 
 import (
+	"bytes"
 	"encoding/json"
 
 	"github.com/looplj/axonhub/llm"
 )
+
+var rawCreateRequestFields = []string{
+	"client_metadata",
+	"context_management",
+	"conversation",
+	"moderation",
+	"prompt",
+	"prompt_cache_options",
+}
+
+var rawCompactRequestFields = []string{
+	"previous_response_id",
+	"prompt_cache_options",
+	"prompt_cache_retention",
+	"service_tier",
+}
 
 func attachOpenAIResponsesRequestExtensions(chatReq *llm.Request, req *Request, rawBody []byte) {
 	if chatReq == nil || req == nil {
@@ -18,13 +35,14 @@ func attachOpenAIResponsesRequestExtensions(chatReq *llm.Request, req *Request, 
 	}
 	requestExt := &llm.OpenAIResponsesRequestExtensions{
 		ReasoningContext: reasoningContext,
+		RawFields:        selectRawRequestFields(raw.Fields, rawCreateRequestFields),
 		RawTools:         buildRawOnlyToolFragments(req.Tools, raw.Tools),
 		ToolSignatures:   buildRepresentedToolSignatures(req.Tools),
 		RawToolChoice:    rawUnsupportedToolChoice(req.ToolChoice, raw.ToolChoice),
 		RawInputItems:    buildRawOnlyInputFragments(req.Input, raw.InputItems),
 	}
 
-	if requestExt.ReasoningContext == "" && len(requestExt.RawTools) == 0 && len(requestExt.RawToolChoice) == 0 && len(requestExt.RawInputItems) == 0 {
+	if requestExt.ReasoningContext == "" && len(requestExt.RawFields) == 0 && len(requestExt.RawTools) == 0 && len(requestExt.RawToolChoice) == 0 && len(requestExt.RawInputItems) == 0 {
 		return
 	}
 
@@ -36,6 +54,7 @@ func attachOpenAIResponsesRequestExtensions(chatReq *llm.Request, req *Request, 
 }
 
 type rawRequestFragments struct {
+	Fields     map[string]json.RawMessage
 	Tools      []json.RawMessage
 	ToolChoice json.RawMessage
 	InputItems []json.RawMessage
@@ -54,6 +73,10 @@ func parseRawRequestFragments(rawBody []byte) rawRequestFragments {
 	if err := json.Unmarshal(rawBody, &raw); err != nil {
 		return rawRequestFragments{}
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(rawBody, &fields); err != nil {
+		return rawRequestFragments{}
+	}
 
 	var inputItems []json.RawMessage
 	if len(raw.Input) > 0 && json.Unmarshal(raw.Input, &inputItems) != nil {
@@ -61,10 +84,58 @@ func parseRawRequestFragments(rawBody []byte) rawRequestFragments {
 	}
 
 	return rawRequestFragments{
+		Fields:     fields,
 		Tools:      raw.Tools,
 		ToolChoice: raw.ToolChoice,
 		InputItems: inputItems,
 	}
+}
+
+func attachOpenAIResponsesRawRequestFields(chatReq *llm.Request, rawBody []byte, fieldNames []string) {
+	if chatReq == nil || len(rawBody) == 0 {
+		return
+	}
+
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(rawBody, &fields) != nil {
+		return
+	}
+	rawFields := selectRawRequestFields(fields, fieldNames)
+	if len(rawFields) == 0 {
+		return
+	}
+
+	ext := llm.EnsureOpenAIResponsesProviderExtensions(chatReq)
+	if ext == nil {
+		return
+	}
+	if ext.Request == nil {
+		ext.Request = &llm.OpenAIResponsesRequestExtensions{}
+	}
+	if ext.Request.RawFields == nil {
+		ext.Request.RawFields = make(map[string]json.RawMessage, len(rawFields))
+	}
+	for key, value := range rawFields {
+		ext.Request.RawFields[key] = value
+	}
+}
+
+func selectRawRequestFields(fields map[string]json.RawMessage, fieldNames []string) map[string]json.RawMessage {
+	if len(fields) == 0 || len(fieldNames) == 0 {
+		return nil
+	}
+
+	selected := make(map[string]json.RawMessage, len(fieldNames))
+	for _, name := range fieldNames {
+		if value, ok := fields[name]; ok {
+			selected[name] = cloneRaw(value)
+		}
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+
+	return selected
 }
 
 func buildRepresentedToolSignatures(tools []Tool) []string {
@@ -74,6 +145,18 @@ func buildRepresentedToolSignatures(tools []Tool) []string {
 
 	signatures := make([]string, 0, len(tools))
 	for _, tool := range tools {
+		if tool.Type == "namespace" {
+			represented := Tool{Type: "namespace", Name: tool.Name}
+			for _, subTool := range tool.Tools {
+				if subTool.Type == "function" {
+					represented.Tools = append(represented.Tools, subTool)
+				}
+			}
+			if len(represented.Tools) > 0 {
+				signatures = append(signatures, responseToolSignature(represented))
+			}
+			continue
+		}
 		if !isStructurallyRepresentedToolType(tool.Type) {
 			continue
 		}
@@ -95,14 +178,30 @@ func buildRawOnlyToolFragments(tools []Tool, rawTools []json.RawMessage) []llm.O
 		}
 
 		fragments = append(fragments, llm.OpenAIResponsesRawFragment{
-			Type:          tools[i].Type,
-			Name:          tools[i].Name,
-			OriginalIndex: i,
-			Raw:           cloneRaw(rawTools[i]),
+			Type:                 tools[i].Type,
+			Name:                 tools[i].Name,
+			OriginalIndex:        i,
+			RepresentedToolCount: representedNamespaceToolCount(tools[i]),
+			Raw:                  cloneRaw(rawTools[i]),
 		})
 	}
 
 	return fragments
+}
+
+func representedNamespaceToolCount(tool Tool) int {
+	if tool.Type != "namespace" {
+		return 0
+	}
+
+	// A namespace is now represented by one grouped Responses tool.
+	for _, subTool := range tool.Tools {
+		if subTool.Type == "function" {
+			return 1
+		}
+	}
+
+	return 0
 }
 
 func isStructurallyRepresentedToolType(toolType string) bool {
@@ -116,6 +215,13 @@ func isStructurallyRepresentedToolType(toolType string) bool {
 
 func responseToolSignature(tool Tool) string {
 	switch tool.Type {
+	case "namespace":
+		names := []string{tool.Name}
+		for _, subTool := range tool.Tools {
+			names = append(names, subTool.Type, subTool.Name)
+		}
+		encoded, _ := json.Marshal(names)
+		return "namespace:" + string(encoded)
 	case "function", "custom":
 		return tool.Type + ":" + tool.Name
 	default:
@@ -159,6 +265,15 @@ func buildRawOnlyInputFragments(input Input, rawItems []json.RawMessage) []llm.O
 	return fragments
 }
 
+// additionalToolsInputItemType is a private Codex construct used by Responses
+// Lite: the tool definitions travel inside a `developer` input item instead of
+// the top-level `tools` array. It is not part of the public Responses API, so
+// OpenAI-compatible upstreams reject it as an unsupported input item type.
+const additionalToolsInputItemType = "additional_tools"
+
+// isStructurallyRepresentedInputItem reports whether an input item type is
+// rebuilt from the unified request. Types that are not rebuilt are replayed
+// verbatim from the raw body; see buildRawOnlyInputFragments.
 func isStructurallyRepresentedInputItem(itemType string) bool {
 	switch itemType {
 	case "", "message", "input_text", "input_image", "function_call", "function_call_output",
@@ -178,7 +293,11 @@ func openAIResponsesRequestExtensions(llmReq *llm.Request) *llm.OpenAIResponsesR
 	return requestExt
 }
 
-func marshalRequestPayload(payload Request, llmReq *llm.Request) ([]byte, error) {
+// marshalRequestPayload marshals the unified request and replays the raw fields,
+// tools and input items the caller sent so they survive the round trip.
+// preserveAdditionalTools decides whether the Responses Lite tool definitions
+// travel along; see mergeRawOnlyInputItems.
+func marshalRequestPayload(payload Request, llmReq *llm.Request, preserveAdditionalTools bool) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -193,6 +312,7 @@ func marshalRequestPayload(payload Request, llmReq *llm.Request) ([]byte, error)
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return nil, err
 	}
+	mergeRawRequestFields(obj, requestExt)
 
 	if tools, ok := mergeRawOnlyTools(obj["tools"], requestExt); ok {
 		toolsRaw, err := json.Marshal(tools)
@@ -206,7 +326,7 @@ func marshalRequestPayload(payload Request, llmReq *llm.Request) ([]byte, error)
 		obj["tool_choice"] = cloneRaw(requestExt.RawToolChoice)
 	}
 
-	if input, ok := mergeRawOnlyInputItems(obj["input"], requestExt); ok {
+	if input, ok := mergeRawOnlyInputItems(obj["input"], requestExt, preserveAdditionalTools); ok {
 		inputRaw, err := json.Marshal(input)
 		if err != nil {
 			return nil, err
@@ -217,9 +337,57 @@ func marshalRequestPayload(payload Request, llmReq *llm.Request) ([]byte, error)
 	return json.Marshal(obj)
 }
 
-func mergeRawOnlyInputItems(structuredRaw json.RawMessage, requestExt *llm.OpenAIResponsesRequestExtensions) ([]json.RawMessage, bool) {
+func mergeRawRequestFields(obj map[string]json.RawMessage, requestExt *llm.OpenAIResponsesRequestExtensions) {
+	if obj == nil || requestExt == nil {
+		return
+	}
+
+	for key, value := range requestExt.RawFields {
+		if _, exists := obj[key]; !exists && len(value) > 0 {
+			obj[key] = cloneRaw(value)
+		}
+	}
+}
+
+func marshalCompactRequestPayload(payload CompactAPIRequest, llmReq *llm.Request) ([]byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	requestExt := openAIResponsesRequestExtensions(llmReq)
+	if requestExt == nil || len(requestExt.RawFields) == 0 {
+		return body, nil
+	}
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, err
+	}
+	mergeRawRequestFields(obj, requestExt)
+
+	return json.Marshal(obj)
+}
+
+// mergeRawOnlyInputItems replays the input items that are not rebuilt from the
+// unified request. `additional_tools` carries the tool definitions of Responses
+// Lite, so it is replayed only when the upstream speaks that private protocol
+// (the official Codex backend). Everywhere else it stays dropped: an
+// OpenAI-compatible upstream rejects the item type outright.
+// mergeRawOnlyInputItems rebuilds the outgoing `input` array from the merged
+// request: items rebuilt from messages and raw items that had no representation
+// are interleaved back into the positions they were sent in.
+func mergeRawOnlyInputItems(structuredRaw json.RawMessage, requestExt *llm.OpenAIResponsesRequestExtensions, preserveAdditionalTools bool) ([]json.RawMessage, bool) {
 	if requestExt == nil || len(requestExt.RawInputItems) == 0 {
 		return nil, false
+	}
+
+	fragments := requestExt.RawInputItems
+	if !preserveAdditionalTools {
+		fragments = withoutInputFragmentsOfType(fragments, additionalToolsInputItemType)
+		if len(fragments) == 0 {
+			return nil, false
+		}
 	}
 
 	var structuredItems []json.RawMessage
@@ -229,11 +397,11 @@ func mergeRawOnlyInputItems(structuredRaw json.RawMessage, requestExt *llm.OpenA
 		}
 	}
 
-	total := len(structuredItems) + len(requestExt.RawInputItems)
+	total := len(structuredItems) + len(fragments)
 	items := make([]json.RawMessage, 0, total)
 	structuredIndex := 0
-	rawByIndex := make(map[int]json.RawMessage, len(requestExt.RawInputItems))
-	for _, fragment := range requestExt.RawInputItems {
+	rawByIndex := make(map[int]json.RawMessage, len(fragments))
+	for _, fragment := range fragments {
 		if len(fragment.Raw) == 0 || fragment.OriginalIndex < 0 {
 			return nil, false
 		}
@@ -259,6 +427,33 @@ func mergeRawOnlyInputItems(structuredRaw json.RawMessage, requestExt *llm.OpenA
 	return items, true
 }
 
+// withoutInputFragmentsOfType returns the fragments that do not carry the given
+// item type. The kept fragments are reindexed to their position in the compacted
+// sequence: the merge that follows places items by their original index, so a
+// fragment left at its old index after an earlier one was dropped would land
+// outside the range the merge can fill. The input slice is not modified in
+// place: it is owned by the request extensions and may be replayed on a retry.
+func withoutInputFragmentsOfType(fragments []llm.OpenAIResponsesRawFragment, itemType string) []llm.OpenAIResponsesRawFragment {
+	kept := make([]llm.OpenAIResponsesRawFragment, 0, len(fragments))
+	dropped := 0
+
+	for _, fragment := range fragments {
+		if fragment.Type == itemType {
+			dropped++
+
+			continue
+		}
+
+		if dropped > 0 {
+			fragment.OriginalIndex -= dropped
+		}
+
+		kept = append(kept, fragment)
+	}
+
+	return kept
+}
+
 func mergeRawOnlyTools(structuredRaw json.RawMessage, requestExt *llm.OpenAIResponsesRequestExtensions) ([]json.RawMessage, bool) {
 	if requestExt == nil || len(requestExt.RawTools) == 0 {
 		return nil, false
@@ -274,20 +469,35 @@ func mergeRawOnlyTools(structuredRaw json.RawMessage, requestExt *llm.OpenAIResp
 		return nil, false
 	}
 
-	total := len(structuredTools) + len(requestExt.RawTools)
+	representedCount := 0
+	for _, fragment := range requestExt.RawTools {
+		if fragment.RepresentedToolCount < 0 {
+			return nil, false
+		}
+		representedCount += fragment.RepresentedToolCount
+	}
+	if representedCount > len(structuredTools) {
+		return nil, false
+	}
+
+	total := len(structuredTools) - representedCount + len(requestExt.RawTools)
 	tools := make([]json.RawMessage, 0, total)
 	structuredIndex := 0
-	rawByIndex := make(map[int]json.RawMessage, len(requestExt.RawTools))
+	rawByIndex := make(map[int]llm.OpenAIResponsesRawFragment, len(requestExt.RawTools))
 	for _, fragment := range requestExt.RawTools {
 		if len(fragment.Raw) == 0 || fragment.OriginalIndex < 0 {
 			return nil, false
 		}
-		rawByIndex[fragment.OriginalIndex] = cloneRaw(fragment.Raw)
+		rawByIndex[fragment.OriginalIndex] = fragment
 	}
 
 	for i := 0; i < total; i++ {
-		if raw, ok := rawByIndex[i]; ok {
-			tools = append(tools, raw)
+		if fragment, ok := rawByIndex[i]; ok {
+			tools = append(tools, cloneRaw(fragment.Raw))
+			structuredIndex += fragment.RepresentedToolCount
+			if structuredIndex > len(structuredTools) {
+				return nil, false
+			}
 			continue
 		}
 		if structuredIndex >= len(structuredTools) {
@@ -323,13 +533,27 @@ func structuredToolSignaturesMatch(structuredTools []json.RawMessage, expected [
 }
 
 func rawToolChoiceMatchesCurrentTools(raw json.RawMessage, current *ToolChoice) bool {
-	if current == nil {
-		return true
-	}
-
 	var rawChoice ToolChoice
 	if err := json.Unmarshal(raw, &rawChoice); err != nil {
 		return false
+	}
+
+	if (rawChoice.Type != nil && *rawChoice.Type == "allowed_tools") ||
+		(current != nil && current.Type != nil && *current.Type == "allowed_tools") {
+		if current == nil {
+			return false
+		}
+		// Matching only mode would restore a stale allowlist after a caller
+		// changed its members or replaced it with an unrestricted string mode.
+		expected, err := json.Marshal(&rawChoice)
+		if err != nil {
+			return false
+		}
+		actual, err := json.Marshal(current)
+		return err == nil && bytes.Equal(expected, actual)
+	}
+	if current == nil {
+		return true
 	}
 
 	currentSignature := toolChoiceSignature(current)

@@ -43,7 +43,7 @@ func TestOpenAICompatibleChannel_BuildChannelWithOutbounds(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, built)
 	require.NotNil(t, built.Outbound)
-	require.Len(t, built.Outbounds, 6)
+	require.Len(t, built.Outbounds, 7)
 
 	require.Equal(t, llm.APIFormatOpenAIChatCompletion, built.Outbound.APIFormat())
 
@@ -51,6 +51,12 @@ func TestOpenAICompatibleChannel_BuildChannelWithOutbounds(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, embeddingOutbound)
 	_, ok := embeddingOutbound.(*openai.OutboundTransformer)
+	require.True(t, ok)
+
+	moderationOutbound, err := BuildOutboundByAPIFormat(built, llm.APIFormatOpenAIModeration.String())
+	require.NoError(t, err)
+	require.NotNil(t, moderationOutbound)
+	_, ok = moderationOutbound.(*openai.OutboundTransformer)
 	require.True(t, ok)
 
 	imageOutbound, err := BuildOutboundByAPIFormat(built, llm.APIFormatOpenAIImageGeneration.String())
@@ -87,7 +93,7 @@ func TestAtlasCloudChannel_BuildChannelWithOutbounds(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, built)
 	require.NotNil(t, built.Outbound)
-	require.Len(t, built.Outbounds, 6)
+	require.Len(t, built.Outbounds, 7)
 
 	require.Equal(t, llm.APIFormatOpenAIChatCompletion, built.Outbound.APIFormat())
 
@@ -95,6 +101,12 @@ func TestAtlasCloudChannel_BuildChannelWithOutbounds(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, embeddingOutbound)
 	_, ok := embeddingOutbound.(*openai.OutboundTransformer)
+	require.True(t, ok)
+
+	moderationOutbound, err := BuildOutboundByAPIFormat(built, llm.APIFormatOpenAIModeration.String())
+	require.NoError(t, err)
+	require.NotNil(t, moderationOutbound)
+	_, ok = moderationOutbound.(*openai.OutboundTransformer)
 	require.True(t, ok)
 }
 
@@ -130,6 +142,27 @@ func TestOpenAIResponsesEndpoint_InheritsWebSocketTransportFromBaseURL(t *testin
 	executor := custom.CustomizeExecutor(nil)
 	_, ok = executor.(*responses.WebSocketExecutor)
 	require.True(t, ok)
+}
+
+func TestOpenAIResponsesCompactEndpoint_RejectsInheritedWebSocketTransport(t *testing.T) {
+	client := enttest.NewEntClient(t, "sqlite3", "file:compact_websocket?mode=memory&_fk=0")
+	defer client.Close()
+
+	ctx := authz.WithTestBypass(context.Background())
+	entChannel := client.Channel.Create().
+		SetName("Responses Compact WebSocket Channel").
+		SetType(channel.TypeOpenaiResponses).
+		SetBaseURL("wss://api.openai.com/v1").
+		SetCredentials(objects.ChannelCredentials{APIKey: "test-key"}).
+		SetSupportedModels([]string{"gpt-5"}).
+		SetDefaultTestModel("gpt-5").
+		SetEndpoints([]objects.ChannelEndpoint{{
+			APIFormat: llm.APIFormatOpenAIResponseCompact.String(),
+		}}).
+		SaveX(ctx)
+
+	_, err := NewChannelServiceForTest(client).buildChannelWithOutbounds(entChannel)
+	require.ErrorContains(t, err, "websocket transport only supports api_format \"openai/responses\"")
 }
 
 func TestCodexOAuthWebSocketEndpointBuildsWithoutAPIKey(t *testing.T) {
@@ -175,6 +208,48 @@ func TestCodexOAuthWebSocketEndpointBuildsWithoutAPIKey(t *testing.T) {
 	custom, ok := outbound.(pipeline.ChannelCustomizedExecutor)
 	require.True(t, ok)
 	require.NotNil(t, custom.CustomizeExecutor(nil))
+}
+
+func TestCodexAlphaSearchEndpointPreservesCustomPath(t *testing.T) {
+	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
+	defer client.Close()
+
+	ctx := authz.WithTestBypass(context.Background())
+
+	entChannel := client.Channel.Create().
+		SetName("Codex Custom Alpha Search Channel").
+		SetType(channel.TypeCodex).
+		SetBaseURL("https://relay.example/backend-api/codex#").
+		SetCredentials(objects.ChannelCredentials{
+			OAuth: &objects.OAuthCredentials{
+				AccessToken:  "access-token",
+				RefreshToken: "refresh-token",
+				ExpiresAt:    time.Now().Add(time.Hour),
+			},
+		}).
+		SetSupportedModels([]string{"gpt-5.5"}).
+		SetDefaultTestModel("gpt-5.5").
+		SetEndpoints([]objects.ChannelEndpoint{{
+			APIFormat: llm.APIFormatOpenAIAlphaSearch.String(),
+			Path:      "/custom/search",
+		}}).
+		SaveX(ctx)
+
+	channelSvc := NewChannelServiceForTest(client)
+	built, err := channelSvc.buildChannelWithOutbounds(entChannel)
+	require.NoError(t, err)
+
+	outbound, err := BuildOutboundByAPIFormat(built, llm.APIFormatOpenAIAlphaSearch.String())
+	require.NoError(t, err)
+
+	request, err := outbound.TransformRequest(ctx, &llm.Request{
+		Model:       "gpt-5.5",
+		RequestType: llm.RequestTypeAlphaSearch,
+		APIFormat:   llm.APIFormatOpenAIAlphaSearch,
+		AlphaSearch: &llm.AlphaSearchRequest{Body: []byte(`{"commands":{"search_query":[]}}`)},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://relay.example/backend-api/codex/custom/search", request.URL)
 }
 
 type testStoppableOutbound struct {

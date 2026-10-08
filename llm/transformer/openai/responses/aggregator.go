@@ -12,6 +12,10 @@ import (
 	"github.com/looplj/axonhub/llm/httpclient"
 )
 
+// maxAggregatedContentParts bounds provider-controlled content indexes before
+// the aggregator expands its dense content-part storage.
+const maxAggregatedContentParts = 1024
+
 // streamAggregator holds the state for aggregating stream chunks.
 type streamAggregator struct {
 	// Response metadata
@@ -86,8 +90,15 @@ func newAggregatedContentPart() *aggregatedContentPart {
 	}
 }
 
+// validAggregatedContentIndex reports whether an upstream content index is safe
+// to store in the aggregator's bounded dense representation.
+func validAggregatedContentIndex(contentIndex int) bool {
+	return contentIndex >= 0 && contentIndex < maxAggregatedContentParts
+}
+
+// ensureContentPart returns the content part at a validated bounded index.
 func ensureContentPart(item *aggregatedItem, contentIndex int) *aggregatedContentPart {
-	if item == nil || contentIndex < 0 {
+	if item == nil || !validAggregatedContentIndex(contentIndex) {
 		return nil
 	}
 
@@ -217,7 +228,8 @@ func AggregateStreamChunks(_ context.Context, chunks []*httpclient.StreamEvent) 
 	}
 
 	meta := llm.ResponseMeta{
-		ID: agg.responseID,
+		ID:        agg.responseID,
+		Completed: agg.status == "completed",
 	}
 
 	if agg.usage != nil {
@@ -457,6 +469,56 @@ func (a *streamAggregator) processEvent(ev *StreamEvent) {
 		applyDoneText(part.Text, ev.Text)
 		part.Final = true
 
+	case StreamEventTypeReasoningTextDelta:
+		contentIndex := lo.FromPtr(ev.ContentIndex)
+		if !validAggregatedContentIndex(contentIndex) {
+			return
+		}
+
+		item := a.getItemForEvent(ev.OutputIndex, ev.ItemID)
+		if item == nil {
+			item = newAggregatedItem()
+			item.Type = "reasoning"
+			item.Status = "in_progress"
+			if ev.ItemID != nil && *ev.ItemID != "" {
+				item.ID = *ev.ItemID
+				a.outputItemsByID[item.ID] = item
+			}
+			a.outputItems[ev.OutputIndex] = append(a.outputItems[ev.OutputIndex], item)
+		}
+
+		part := ensureContentPart(item, contentIndex)
+		if part == nil {
+			return
+		}
+		part.Type = "reasoning_text"
+		part.Text.WriteString(ev.Delta)
+
+	case StreamEventTypeReasoningTextDone:
+		contentIndex := lo.FromPtr(ev.ContentIndex)
+		if !validAggregatedContentIndex(contentIndex) {
+			return
+		}
+
+		item := a.getItemForEvent(ev.OutputIndex, ev.ItemID)
+		if item == nil {
+			item = newAggregatedItem()
+			item.Type = "reasoning"
+			item.Status = "in_progress"
+			if ev.ItemID != nil && *ev.ItemID != "" {
+				item.ID = *ev.ItemID
+				a.outputItemsByID[item.ID] = item
+			}
+			a.outputItems[ev.OutputIndex] = append(a.outputItems[ev.OutputIndex], item)
+		}
+
+		part := ensureContentPart(item, contentIndex)
+		if part == nil {
+			return
+		}
+		part.Type = "reasoning_text"
+		applyDoneText(part.Text, ev.Text)
+
 	case StreamEventTypeOutputItemDone:
 		// Mark item as completed and update with final data
 		if ev.Item != nil {
@@ -518,12 +580,11 @@ func (a *streamAggregator) processEvent(ev *StreamEvent) {
 		}
 
 	case StreamEventTypeResponseCompleted:
-		a.status = "completed"
-		if ev.Response != nil {
-			a.previousResponseID = ev.Response.PreviousResponseID
-			if ev.Response.Usage != nil {
-				a.usage = ev.Response.Usage
-			}
+		a.applyResponseSnapshot(ev.Response)
+		// The terminal event wins over a missing or stale in-progress status,
+		// while explicit failed, incomplete, and canceled outcomes are preserved.
+		if ev.Response == nil || ev.Response.Status == nil || a.status == "" || a.status == "in_progress" {
+			a.status = "completed"
 		}
 
 	case StreamEventTypeResponseFailed:
@@ -643,9 +704,9 @@ func (a *streamAggregator) buildResponse() *Response {
 				})
 
 			case "reasoning":
-				// ...existing reasoning handling...
 				{
 					var summary []ReasoningSummary
+					var content *Input
 
 					if len(item.SummaryParts) > 0 {
 						maxSummaryIndex := -1
@@ -677,11 +738,25 @@ func (a *streamAggregator) buildResponse() *Response {
 						}
 					}
 
+					if len(item.Content) > 0 {
+						contentItems := make([]Item, 0, len(item.Content))
+						for _, part := range item.Content {
+							text := part.Text.String()
+							contentType := part.Type
+							if contentType == "" {
+								contentType = "reasoning_text"
+							}
+							contentItems = append(contentItems, Item{Type: contentType, Text: &text})
+						}
+						content = &Input{Items: contentItems}
+					}
+
 					output = append(output, Item{
 						ID:               item.ID,
 						Type:             item.Type,
 						Status:           lo.ToPtr(item.Status),
 						Summary:          summary,
+						Content:          content,
 						EncryptedContent: item.EncryptedContent,
 					})
 				}

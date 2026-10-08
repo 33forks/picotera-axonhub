@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
@@ -22,7 +24,9 @@ import (
 	"github.com/looplj/axonhub/llm/httpclient"
 	"github.com/looplj/axonhub/llm/transformer"
 	"github.com/looplj/axonhub/llm/transformer/openai"
+	"github.com/looplj/axonhub/llm/transformer/openai/decisions"
 	"github.com/looplj/axonhub/llm/transformer/openai/responses"
+	"github.com/looplj/axonhub/llm/transformer/shared"
 )
 
 type OpenAIHandlersParams struct {
@@ -43,6 +47,7 @@ type OpenAIHandlersParams struct {
 	ChannelLimiterManager       *orchestrator.ChannelLimiterManager
 	ProviderQuotaStatusProvider orchestrator.ProviderQuotaStatusProvider
 	Client                      *ent.Client
+	SSEKeepAliveConfig          SSEKeepAliveConfig
 }
 
 type OpenAIHandlers struct {
@@ -55,6 +60,9 @@ type OpenAIHandlers struct {
 	ResponseCompletionHandlers *ChatCompletionHandlers
 	CompactHandlers            *ChatCompletionHandlers
 	EmbeddingHandlers          *ChatCompletionHandlers
+	ModerationHandlers         *ChatCompletionHandlers
+	AlphaSearchHandlers        *ChatCompletionHandlers
+	DecisionsHandlers          *ChatCompletionHandlers
 	ImageGenerationHandlers    *ChatCompletionHandlers
 	ImageEditHandlers          *ChatCompletionHandlers
 	ImageVariationHandlers     *ChatCompletionHandlers
@@ -75,7 +83,7 @@ func NewOpenAIHandlers(params OpenAIHandlersParams) *OpenAIHandlers {
 	videoInbound := openai.NewVideoInboundTransformer()
 	speechInbound := openai.NewSpeechInboundTransformer()
 
-	return &OpenAIHandlers{
+	handlers := &OpenAIHandlers{
 		ChatCompletionHandlers: &ChatCompletionHandlers{
 			ChatCompletionOrchestrator: orchestrator.NewChatCompletionOrchestrator(
 				params.ChannelService,
@@ -111,6 +119,7 @@ func NewOpenAIHandlers(params OpenAIHandlersParams) *OpenAIHandlers {
 			),
 		},
 		ResponseCompletionHandlers: &ChatCompletionHandlers{
+			streamAdapterFactory: newResponsesStreamAdapter,
 			ChatCompletionOrchestrator: orchestrator.NewChatCompletionOrchestrator(
 				params.ChannelService,
 				params.DefaultSelector,
@@ -151,6 +160,57 @@ func NewOpenAIHandlers(params OpenAIHandlersParams) *OpenAIHandlers {
 				params.RequestService,
 				params.HttpClient,
 				openai.NewEmbeddingInboundTransformer(),
+				params.SystemService,
+				params.UsageLogService,
+				params.PromptService,
+				params.QuotaService,
+				params.PromptProtectionRuleService,
+				params.LiveStreamRegistry,
+				params.ChannelLimiterManager,
+				params.ProviderQuotaStatusProvider,
+			),
+		},
+		ModerationHandlers: &ChatCompletionHandlers{
+			ChatCompletionOrchestrator: orchestrator.NewChatCompletionOrchestrator(
+				params.ChannelService,
+				params.DefaultSelector,
+				params.RequestService,
+				params.HttpClient,
+				openai.NewModerationInboundTransformer(),
+				params.SystemService,
+				params.UsageLogService,
+				params.PromptService,
+				params.QuotaService,
+				params.PromptProtectionRuleService,
+				params.LiveStreamRegistry,
+				params.ChannelLimiterManager,
+				params.ProviderQuotaStatusProvider,
+			),
+		},
+		AlphaSearchHandlers: &ChatCompletionHandlers{
+			ChatCompletionOrchestrator: orchestrator.NewChatCompletionOrchestrator(
+				params.ChannelService,
+				params.DefaultSelector,
+				params.RequestService,
+				params.HttpClient,
+				openai.NewAlphaSearchInboundTransformer(),
+				params.SystemService,
+				params.UsageLogService,
+				params.PromptService,
+				params.QuotaService,
+				params.PromptProtectionRuleService,
+				params.LiveStreamRegistry,
+				params.ChannelLimiterManager,
+				params.ProviderQuotaStatusProvider,
+			),
+		},
+		DecisionsHandlers: &ChatCompletionHandlers{
+			ChatCompletionOrchestrator: orchestrator.NewChatCompletionOrchestrator(
+				params.ChannelService,
+				params.DefaultSelector,
+				params.RequestService,
+				params.HttpClient,
+				decisions.NewInboundTransformer(),
 				params.SystemService,
 				params.UsageLogService,
 				params.PromptService,
@@ -288,6 +348,21 @@ func NewOpenAIHandlers(params OpenAIHandlersParams) *OpenAIHandlers {
 			),
 		},
 	}
+
+	for _, handler := range []*ChatCompletionHandlers{
+		handlers.ChatCompletionHandlers,
+		handlers.CompletionHandlers,
+		handlers.ResponseCompletionHandlers,
+		handlers.CompactHandlers,
+		handlers.SpeechHandlers,
+		handlers.TranscriptionHandlers,
+		handlers.TranslationHandlers,
+	} {
+		handler.sseKeepAlive = params.SSEKeepAliveConfig
+		handler.sseHeartbeatFormat = sseHeartbeatOpenAI
+	}
+
+	return handlers
 }
 
 func (handlers *OpenAIHandlers) ChatCompletion(c *gin.Context) {
@@ -299,7 +374,22 @@ func (handlers *OpenAIHandlers) Completion(c *gin.Context) {
 }
 
 func (handlers *OpenAIHandlers) CreateResponse(c *gin.Context) {
+	c.Request = c.Request.WithContext(shared.WithResponsesAPI(c.Request.Context()))
 	handlers.ResponseCompletionHandlers.ChatCompletion(c)
+}
+
+func (handlers *OpenAIHandlers) CreateResponseWebSocket(requestTimeout time.Duration) gin.HandlerFunc {
+	orch := handlers.ResponseCompletionHandlers.ChatCompletionOrchestrator
+	return func(c *gin.Context) {
+		serveResponsesWebSocket(
+			c,
+			requestTimeout,
+			orch.Process,
+			func(ctx context.Context, err error) *httpclient.Error {
+				return transformOrchestratorError(ctx, err, orch)
+			},
+		)
+	}
 }
 
 func (handlers *OpenAIHandlers) CompactResponse(c *gin.Context) {
@@ -308,6 +398,20 @@ func (handlers *OpenAIHandlers) CompactResponse(c *gin.Context) {
 
 func (handlers *OpenAIHandlers) CreateEmbedding(c *gin.Context) {
 	handlers.EmbeddingHandlers.ChatCompletion(c)
+}
+
+// CreateModeration handles POST /v1/moderations.
+func (handlers *OpenAIHandlers) CreateModeration(c *gin.Context) {
+	handlers.ModerationHandlers.ChatCompletion(c)
+}
+
+// CreateAlphaSearch handles POST /v1/alpha/search.
+func (handlers *OpenAIHandlers) CreateAlphaSearch(c *gin.Context) {
+	handlers.AlphaSearchHandlers.ChatCompletion(c)
+}
+
+func (handlers *OpenAIHandlers) CreateDecisions(c *gin.Context) {
+	handlers.DecisionsHandlers.ChatCompletion(c)
 }
 
 // CreateSpeech handles POST /v1/audio/speech (text-to-speech). The response is binary audio.

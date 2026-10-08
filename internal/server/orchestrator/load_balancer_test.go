@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/looplj/axonhub/internal/authz"
-	"github.com/looplj/axonhub/internal/contexts"
 	"github.com/looplj/axonhub/internal/ent"
 	"github.com/looplj/axonhub/internal/ent/enttest"
 	"github.com/looplj/axonhub/internal/objects"
@@ -115,6 +114,108 @@ func TestLoadBalancer_Sort_WithoutWeightTieBreaker_PreservesInputOrderWhenScores
 	assert.Equal(t, 1, result[0].Channel.ID)
 	assert.Equal(t, 2, result[1].Channel.ID)
 	assert.Equal(t, 3, result[2].Channel.ID)
+}
+
+func TestLoadBalancer_Sort_RoundRobinHighCountsStayBalanced(t *testing.T) {
+	ctx := context.Background()
+	channel1Metrics := &biz.AggregatedMetrics{}
+	channel1Metrics.RequestCount = 3000
+	channel2Metrics := &biz.AggregatedMetrics{}
+	channel2Metrics.RequestCount = 3000
+	metricsProvider := &mockMetricsProvider{
+		metrics: map[int]*biz.AggregatedMetrics{
+			1: channel1Metrics,
+			2: channel2Metrics,
+		},
+	}
+	lb := NewLoadBalancer(
+		&mockSystemService{retryPolicy: &biz.RetryPolicy{Enabled: false}},
+		metricsProvider,
+		NewRoundRobinStrategy(metricsProvider),
+		NewRateLimitAwareStrategy(NewChannelRequestTracker(), NewChannelLimiterManager()),
+	).WithoutWeightTieBreaker()
+	candidates := []*ChannelModelsCandidate{
+		{Channel: &biz.Channel{Channel: &ent.Channel{ID: 1, Name: "ch1"}}},
+		{Channel: &biz.Channel{Channel: &ent.Channel{ID: 2, Name: "ch2"}}},
+	}
+
+	selected := map[int]int{}
+	for range 20 {
+		result := lb.Sort(ctx, candidates, "", false)
+		require.Len(t, result, 1)
+		selected[result[0].Channel.ID]++
+	}
+
+	assert.Equal(t, 10, selected[1])
+	assert.Equal(t, 10, selected[2])
+}
+
+func TestLoadBalancer_Sort_RoundRobinWithRateLimit(t *testing.T) {
+	tests := []struct {
+		name          string
+		requestCounts [2]int64
+		rpmLimits     [2]int64
+		cooldown      bool
+		wantChannelID int
+	}{
+		{
+			name:          "small headroom difference preserves round robin preference",
+			requestCounts: [2]int64{20, 21},
+			rpmLimits:     [2]int64{100, 200},
+			wantChannelID: 1,
+		},
+		{
+			name:          "unconfigured limits preserve round robin preference",
+			requestCounts: [2]int64{20, 21},
+			wantChannelID: 1,
+		},
+		{
+			name:          "cooldown overrides lower request count",
+			requestCounts: [2]int64{0, 3000},
+			cooldown:      true,
+			wantChannelID: 2,
+		},
+		{
+			name:          "exhausted rpm overrides lower request count",
+			requestCounts: [2]int64{1, 3000},
+			rpmLimits:     [2]int64{1, 200},
+			wantChannelID: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			metricsProvider := &mockMetricsProvider{metrics: make(map[int]*biz.AggregatedMetrics)}
+			tracker := NewChannelRequestTracker()
+			candidates := make([]*ChannelModelsCandidate, 0, 2)
+			for i, count := range tt.requestCounts {
+				id := i + 1
+				metrics := &biz.AggregatedMetrics{}
+				metrics.RequestCount = count
+				metricsProvider.metrics[id] = metrics
+				channel := &biz.Channel{Channel: &ent.Channel{ID: id}}
+				if rpm := tt.rpmLimits[i]; rpm > 0 {
+					channel.Settings = &objects.ChannelSettings{RateLimit: &objects.ChannelRateLimit{RPM: &rpm}}
+					require.True(t, tracker.TryAcquireRequest(id, rpm))
+				}
+				candidates = append(candidates, &ChannelModelsCandidate{Channel: channel})
+			}
+			if tt.cooldown {
+				tracker.SetCooldown(1, time.Now().Add(time.Minute))
+			}
+			lb := newTestLoadBalancer(t, &biz.RetryPolicy{Enabled: false},
+				NewRoundRobinStrategy(metricsProvider),
+				NewRateLimitAwareStrategy(tracker, NewChannelLimiterManager()),
+			).WithoutWeightTieBreaker().WithRoundRobinHealthFilter(NewRoundRobinHealthStrategy(metricsProvider))
+
+			// With one RPM slot used each, limits of 100 and 200 yield scores
+			// of 99 and 99.5. This small difference must not reverse 20 vs 21
+			// requests, while cooldown and exhausted limits must still win.
+			result := lb.Sort(context.Background(), candidates, "", false)
+			require.Len(t, result, 1)
+			require.Equal(t, tt.wantChannelID, result[0].Channel.ID)
+		})
+	}
 }
 
 func TestLoadBalancer_Sort_RoundRobinHealthMovesUnhealthyChannelsLast(t *testing.T) {
@@ -547,201 +648,6 @@ func TestLoadBalancer_ErrorAware_ShortTermErrorPenalty(t *testing.T) {
 	// ch2 should be ranked higher due to ch1's recent error
 	assert.Equal(t, ch2.ID, result[0].Channel.ID, "Stable channel should be ranked first")
 	assert.Equal(t, ch1.ID, result[1].Channel.ID, "Channel with recent error should be ranked lower")
-}
-
-// TestLoadBalancer_TraceAware_SameChannelPrioritized tests that when a trace ID
-// exists, the channel that last succeeded for that trace is prioritized.
-func TestLoadBalancer_TraceAware_SameChannelPrioritized(t *testing.T) {
-	ctx := context.Background()
-	ctx = authz.WithTestBypass(ctx)
-
-	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
-	defer client.Close()
-
-	// Create project
-	project, err := client.Project.Create().
-		SetName("test-project").
-		Save(ctx)
-	require.NoError(t, err)
-
-	// Create channels
-	ch1, err := client.Channel.Create().
-		SetName("channel-1").
-		SetType("openai").
-		SetSupportedModels([]string{"gpt-4"}).
-		SetDefaultTestModel("gpt-4").
-		SetOrderingWeight(50).
-		SetCredentials(objects.ChannelCredentials{APIKey: "test-key-1"}).
-		Save(ctx)
-	require.NoError(t, err)
-
-	ch2, err := client.Channel.Create().
-		SetName("channel-2").
-		SetType("openai").
-		SetSupportedModels([]string{"gpt-4"}).
-		SetDefaultTestModel("gpt-4").
-		SetOrderingWeight(50).
-		SetCredentials(objects.ChannelCredentials{APIKey: "test-key-2"}).
-		Save(ctx)
-	require.NoError(t, err)
-
-	ch3, err := client.Channel.Create().
-		SetName("channel-3").
-		SetType("openai").
-		SetSupportedModels([]string{"gpt-4"}).
-		SetDefaultTestModel("gpt-4").
-		SetOrderingWeight(50).
-		SetCredentials(objects.ChannelCredentials{APIKey: "test-key-3"}).
-		Save(ctx)
-	require.NoError(t, err)
-
-	// Create trace
-	trace, err := client.Trace.Create().
-		SetProjectID(project.ID).
-		SetTraceID("test-trace-abc").
-		Save(ctx)
-	require.NoError(t, err)
-
-	// Create a successful request with ch2 in this trace
-	_, err = client.Request.Create().
-		SetProjectID(project.ID).
-		SetTraceID(trace.ID).
-		SetChannelID(ch2.ID).
-		SetModelID("gpt-4").
-		SetStatus("completed").
-		SetSource("api").
-		SetRequestBody([]byte(`{"model":"gpt-4","messages":[]}`)).
-		Save(ctx)
-	require.NoError(t, err)
-
-	// Add trace entity to context and ent client
-	ctx = contexts.WithTrace(ctx, trace) // Use the trace entity directly
-	ctx = ent.NewContext(ctx, client)
-
-	requestService := newTestRequestService(client)
-	traceStrategy := NewTraceAwareStrategy(requestService)
-	weightStrategy := NewWeightStrategy()
-	// Mock SystemService for testing
-	lb := newTestLoadBalancer(t, &biz.RetryPolicy{Enabled: true, MaxChannelRetries: 3}, traceStrategy, weightStrategy)
-
-	candidates := []*ChannelModelsCandidate{
-		{Channel: &biz.Channel{Channel: ch1}},
-		{Channel: &biz.Channel{Channel: ch2}},
-		{Channel: &biz.Channel{Channel: ch3}},
-	}
-
-	result := lb.Sort(ctx, candidates, "", false)
-	require.Len(t, result, 3)
-
-	// ch2 should be ranked first because it was the last successful channel in this trace
-	assert.Equal(t, ch2.ID, result[0].Channel.ID, "Channel from trace should be ranked first")
-}
-
-// TestLoadBalancer_Combined_ErrorAndTrace tests the combined behavior of
-// error-aware and trace-aware strategies.
-func TestLoadBalancer_Combined_ErrorAndTrace(t *testing.T) {
-	ctx := context.Background()
-	ctx = authz.WithTestBypass(ctx)
-
-	client := enttest.NewEntClient(t, "sqlite3", "file:ent?mode=memory&_fk=0")
-	defer client.Close()
-
-	// Create project
-	project, err := client.Project.Create().
-		SetName("test-project").
-		Save(ctx)
-	require.NoError(t, err)
-
-	// Create channels
-	ch1, err := client.Channel.Create().
-		SetName("healthy-channel").
-		SetType("openai").
-		SetSupportedModels([]string{"gpt-4"}).
-		SetDefaultTestModel("gpt-4").
-		SetOrderingWeight(50).
-		SetCredentials(objects.ChannelCredentials{APIKey: "test-key-1"}).
-		Save(ctx)
-	require.NoError(t, err)
-
-	ch2, err := client.Channel.Create().
-		SetName("trace-channel-with-errors").
-		SetType("openai").
-		SetSupportedModels([]string{"gpt-4"}).
-		SetDefaultTestModel("gpt-4").
-		SetOrderingWeight(50).
-		SetCredentials(objects.ChannelCredentials{APIKey: "test-key-2"}).
-		Save(ctx)
-	require.NoError(t, err)
-
-	ch3, err := client.Channel.Create().
-		SetName("another-channel").
-		SetType("openai").
-		SetSupportedModels([]string{"gpt-4"}).
-		SetDefaultTestModel("gpt-4").
-		SetOrderingWeight(50).
-		SetCredentials(objects.ChannelCredentials{APIKey: "test-key-3"}).
-		Save(ctx)
-	require.NoError(t, err)
-
-	channelService := newTestChannelService(client)
-
-	// Record consecutive failures for ch2
-	for range 2 {
-		perf := &biz.PerformanceRecord{
-			ChannelID:          ch2.ID,
-			StartTime:          time.Now().Add(-time.Minute),
-			EndTime:            time.Now(),
-			Success:            false,
-			RequestCompleted:   true,
-			ResponseStatusCode: 500,
-		}
-		channelService.RecordPerformance(ctx, perf)
-	}
-
-	// Create trace with ch2 as last successful channel
-	trace, err := client.Trace.Create().
-		SetProjectID(project.ID).
-		SetTraceID("test-trace-xyz").
-		Save(ctx)
-	require.NoError(t, err)
-
-	_, err = client.Request.Create().
-		SetProjectID(project.ID).
-		SetTraceID(trace.ID).
-		SetChannelID(ch2.ID).
-		SetModelID("gpt-4").
-		SetStatus("completed").
-		SetSource("api").
-		SetRequestBody([]byte(`{"model":"gpt-4","messages":[]}`)).
-		Save(ctx)
-	require.NoError(t, err)
-
-	// Add trace entity to context and ent client
-	ctx = contexts.WithTrace(ctx, trace) // Use the trace entity directly
-	ctx = ent.NewContext(ctx, client)
-
-	// Create load balancer with both strategies
-	requestService := newTestRequestService(client)
-	traceStrategy := NewTraceAwareStrategy(requestService)
-	errorStrategy := NewErrorAwareStrategy(channelService)
-	weightStrategy := NewWeightStrategy()
-	// Mock SystemService for testing
-	lb := newTestLoadBalancer(t, &biz.RetryPolicy{Enabled: true, MaxChannelRetries: 3}, traceStrategy, errorStrategy, weightStrategy)
-
-	candidates := []*ChannelModelsCandidate{
-		{Channel: &biz.Channel{Channel: ch1}},
-		{Channel: &biz.Channel{Channel: ch2}},
-		{Channel: &biz.Channel{Channel: ch3}},
-	}
-
-	result := lb.Sort(ctx, candidates, "", false)
-	require.Len(t, result, 3)
-
-	// ch2 should still be ranked first because trace boost (1000) outweighs error penalty
-	// TraceAware gives +1000, ErrorAware gives penalty (around -100 to -150), Weight gives +50
-	// Net score for ch2: ~900-950
-	// ch1 and ch3: ErrorAware ~200, Weight ~50 = ~250
-	assert.Equal(t, ch2.ID, result[0].Channel.ID, "Trace channel should be first despite errors (trace boost is stronger)")
 }
 
 // mockSystemService is a test mock for SystemService.

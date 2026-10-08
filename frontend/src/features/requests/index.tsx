@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import { useNavigate, useRouterState } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import {
@@ -10,11 +10,12 @@ import {
   type DateTimeRangeValue,
   type TimeValue,
 } from '@/utils/date-range';
+import { useAutoRefreshInterval } from '@/hooks/use-auto-refresh-interval';
 import { useDebounce } from '@/hooks/use-debounce';
 import { usePaginationSearch } from '@/hooks/use-pagination-search';
 import useInterval from '@/hooks/useInterval';
-import { Header } from '@/components/layout/header';
 import { Main } from '@/components/layout/main';
+import { PageHeader } from '@/components/layout/page-header';
 import { RequestsTable, type RequestTableFilters } from './components';
 import { RequestsProvider } from './context';
 import { useRequests } from './data';
@@ -186,7 +187,7 @@ function RequestsContent() {
     [currentSearch]
   );
   const debouncedModelIDFilter = useDebounce(modelIDFilter, 300);
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoRefreshInterval, setAutoRefreshInterval] = useAutoRefreshInterval('requests-auto-refresh-interval-ms');
 
   // Build where clause with filters
   const whereClause = (() => {
@@ -225,11 +226,12 @@ function RequestsContent() {
 
   const isFirstPage = !paginationArgs.after && cursorHistory.length === 0;
 
-  useInterval(
+  const autoRefreshResumeKey = useInterval(
     () => {
       refetch();
     },
-    autoRefresh && isFirstPage ? 10000 : null
+    isFirstPage ? autoRefreshInterval : null,
+    { refreshOnResume: true }
   );
 
   const handleNextPage = () => {
@@ -357,8 +359,9 @@ function RequestsContent() {
         onViewDetail={handleViewDetail}
         onRefresh={refetch}
         showRefresh={isFirstPage}
-        autoRefresh={autoRefresh}
-        onAutoRefreshChange={setAutoRefresh}
+        autoRefreshInterval={autoRefreshInterval}
+        autoRefreshResumeKey={autoRefreshResumeKey}
+        onAutoRefreshIntervalChange={setAutoRefreshInterval}
       />
     </div>
   );
@@ -369,16 +372,9 @@ export default function RequestsManagement() {
 
   return (
     <RequestsProvider>
-      <Header fixed>
-        <div className='flex flex-1 items-center justify-between'>
-          <div>
-            <h2 className='text-xl font-bold tracking-tight'>{t('requests.title')}</h2>
-            <p className='text-muted-foreground text-sm'>{t('requests.description')}</p>
-          </div>
-        </div>
-      </Header>
+      <PageHeader title={t('requests.title')} description={t('requests.description')} />
 
-      <Main fixed>
+      <Main fixed className='py-2 sm:py-6'>
         <RequestsContent />
       </Main>
     </RequestsProvider>

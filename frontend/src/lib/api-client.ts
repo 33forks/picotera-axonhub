@@ -1,4 +1,5 @@
-import { AuthUser, getTokenFromStorage } from '@/stores/authStore';
+import { ensureFreshAccessToken } from '@/lib/auth-session';
+import type { AuthUser } from '@/stores/authStore';
 
 // Same domain, no need to add baseURL.
 export const API_BASE_URL = '';
@@ -58,7 +59,7 @@ export async function apiRequest<T>(endpoint: string, options: ApiRequestOptions
 
   // Add Authorization header if auth is required
   if (requireAuth) {
-    const token = getTokenFromStorage();
+    const token = await ensureFreshAccessToken();
     if (token) {
       requestHeaders['Authorization'] = `Bearer ${token}`;
     }
@@ -141,6 +142,22 @@ export const authApi = {
     token: string;
   }> =>
     apiRequest('/admin/auth/signin', {
+      method: 'POST',
+      body: data,
+    }),
+
+  getInvitation: (token: string): Promise<{
+    projectName: string;
+    expiresAt: string | null;
+    maxUses: number;
+    remainingUses: number;
+  }> => apiRequest(`/auth/invitations/${encodeURIComponent(token)}`),
+
+  registerInvitation: (
+    token: string,
+    data: { email: string; password: string; firstName: string; lastName: string }
+  ): Promise<{ user: AuthUser; token: string }> =>
+    apiRequest(`/auth/invitations/${encodeURIComponent(token)}/register`, {
       method: 'POST',
       body: data,
     }),
